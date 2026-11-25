@@ -6,8 +6,10 @@ import type { CompiledNode, CompiledTrigger, Params, BlockSpec } from '@engine/i
 import { registry } from './blocks';
 import type { ObjectBlock, TriggerBlock, FilterBlock, ActionBlock } from './blocks/types';
 import { LookPicker, lookKey, lookName, lookColor, DEFAULT_LOOK } from './looks';
-import type { Look, LookSetting, SimDef, SimEvent } from './types';
+import type { Fx, Look, LookSetting, SimDef, SimEvent } from './types';
 import { DEFAULT_SETTINGS, NONE, isBody, isCollider, isZone, colliderOf, colliderRef, zoneOf, zoneRef } from './types';
+import { Arena } from './arena';
+import { Sledge } from './sledge';
 
 export interface GroupInfo {
   index: number;
@@ -33,6 +35,7 @@ export interface Zone {
   color: string;
   visible: boolean;
   alive: boolean;
+  label: string;
 }
 
 export interface Motion {
@@ -53,6 +56,8 @@ export interface CounterInfo {
   name: string;
   value: number;
   show: boolean;
+  /** When set, the counter shows the live size of this group instead of a stored value. */
+  countGroup: number;
 }
 
 export interface SpawnReq {
@@ -63,9 +68,19 @@ export interface SpawnReq {
   vy: number;
   /** Copy size/look/hp from this body index (duplicate). -1 = from template. */
   from: number;
+  /** Size override (split). 0 = none. */
+  r?: number;
 }
 
-type Hook = (e: SimEvent) => void;
+/** Ring metadata kept so a ring can change size while its gaps keep a fixed width. */
+export interface RingMeta {
+  group: number;
+  gaps: { at: number; len: number }[];
+  /** Index of this ring within its group (0 = innermost). */
+  k: number;
+}
+
+const FX_CAP = 1500;
 
 export class Sim {
   readonly def: SimDef;
@@ -75,17 +90,23 @@ export class Sim {
   readonly dispatcher: Dispatcher<SimEvent>;
   readonly triggers: CompiledTrigger[];
   readonly dt: number;
+  readonly settings: typeof DEFAULT_SETTINGS;
 
   groups: GroupInfo[] = [];
   groupByNode = new Map<string, number>();
   counters = new Map<string, CounterInfo>();
   zones: Zone[] = [];
   outcome: { label: string; time: number } | null = null;
-  /** Recent explosions, for the renderer. */
-  flash: { x: number; y: number; r: number; t: number }[] = [];
   /** Seconds since the outcome. */
   sinceEnd = 0;
+  /** Seconds spent in the starting pose so far. */
+  preTime = 0;
   assets: Record<string, string>;
+  /** Visual/audio events. Only collected when someone is watching (fxOn). */
+  fx: Fx[] = [];
+  fxOn = false;
+  /** Recent explosions, for the renderer. */
+  flash: { x: number; y: number; r: number; t: number }[] = [];
 
   /* Per-body extras */
   readonly look: Int32Array;
@@ -94,8 +115,22 @@ export class Sim {
   readonly born: Float64Array;
   readonly nameIdx: Int32Array;
   readonly pendingDead: Uint8Array;
+  /** 1 for bodies created by Duplicate. */
+  readonly isCopy: Uint8Array;
+  /** Render opacity (hidden bodies fade back in). */
+  readonly alpha: Float32Array;
+  /** Out of play: falling off the screen. Value is the time it started falling (0 = in play). */
+  readonly fallT: Float64Array;
+  /** Mask a body had before being hidden or dropped. */
+  readonly savedMask: Uint32Array;
   readonly tSeq: Float64Array;
   private tSeqNext = 1;
+  /* Progress around the center, for "stalled" (spiral). */
+  needProgress = false;
+  private progAng: Float64Array;
+  private progUnwrap: Float64Array;
+  private progBest: Float64Array;
+  private progBestT: Float64Array;
   names: string[] = [];
   looks: Look[] = [];
   private lookIndex = new Map<string, number>();
@@ -105,8 +140,18 @@ export class Sim {
   colColor: string[] = [];
   colRadius: number[] = [];
   colMotion: Motion[] = [];
+  colMaterial: string[] = [];
+  /** Palette swept around a collider's center (single rings, spirals). */
+  colGrad: (string[] | undefined)[] = [];
+  colGradCenter: ([number, number] | undefined)[] = [];
+  ringMeta: (RingMeta | undefined)[] = [];
 
-  /* Hooks (filled by trigger setups) */
+  /** Arena systems: statuses, pickups, weapons, flames. */
+  readonly arena: Arena;
+  readonly sledges: Sledge[] = [];
+  /** Groups whose innermost ring closes in on the ball. */
+  closeIn: { group: number; delay: number; rate: number; cur: number; since: number; px: number; py: number; order: number[]; ptr: number }[] = [];
+
   readonly hooks = {
     step: [] as (() => void)[],
     wall: [] as ((i: number, col: number, k: number) => void)[],
@@ -115,21 +160,25 @@ export class Sim {
     spawned: [] as ((h: number, group: number) => void)[],
     destroyed: [] as ((h: number, group: number, x: number, y: number) => void)[],
     tetherLost: [] as ((owner: number) => void)[],
+    crushed: [] as ((i: number, x: number, y: number) => void)[],
     freed: [] as ((i: number) => void)[],
+    afterBuild: [] as (() => void)[],
   };
 
   private destroyQueue: number[] = [];
   private spawnQueue: SpawnReq[] = [];
+  private scheduled: { t: number; req: SpawnReq }[] = [];
   private spawnedEv: { h: number; g: number }[] = [];
   private destroyedEv: { h: number; g: number; x: number; y: number }[] = [];
   private tetherLostEv: number[] = [];
+  private fxBounces = 0;
 
   /** Reused event object. Actions must not keep references to it. */
   readonly e: SimEvent = { self: NONE, other: NONE, px: 0, py: 0, nx: 0, ny: 0, tether: NONE, speed: 0 };
 
   constructor(def: SimDef) {
     this.def = def;
-    const s = { ...DEFAULT_SETTINGS, ...def.settings };
+    const s = (this.settings = { ...DEFAULT_SETTINGS, ...def.settings });
     this.rng = new Rng(def.seed);
     this.lookRng = new Rng((def.seed ^ 0x5bd1e995) >>> 0);
     this.assets = def.assets ?? {};
@@ -140,12 +189,14 @@ export class Sim {
       tetherCapacity: Math.min(60000, cap * 6),
       contactCapacity: Math.min(60000, cap * 4),
       gravityMode: s.gravityMode,
-      gravityX: dmath.cos(ga) * s.gravity,
-      gravityY: dmath.sin(ga) * s.gravity,
+      gravityX: s.gravityMode === 'point' ? s.gravity : dmath.cos(ga) * s.gravity,
+      gravityY: s.gravityMode === 'point' ? 0 : dmath.sin(ga) * s.gravity,
       maxSpeed: s.speedLimit,
-      cellSize: 16,
+      cellSize: 28,
       maxSubsteps: 48,
-      minImpactSpeed: 4,
+      minImpactSpeed: 6,
+      pairCorrection: s.pairCorrection,
+      restThreshold: s.restThreshold,
     });
     this.dt = this.world.cfg.dt;
     this.look = new Int32Array(cap);
@@ -154,21 +205,29 @@ export class Sim {
     this.born = new Float64Array(cap);
     this.nameIdx = new Int32Array(cap).fill(-1);
     this.pendingDead = new Uint8Array(cap);
+    this.isCopy = new Uint8Array(cap);
+    this.alpha = new Float32Array(cap).fill(1);
+    this.fallT = new Float64Array(cap);
+    this.savedMask = new Uint32Array(cap);
+    this.progAng = new Float64Array(cap);
+    this.progUnwrap = new Float64Array(cap);
+    this.progBest = new Float64Array(cap);
+    this.progBestT = new Float64Array(cap);
     this.tSeq = new Float64Array(this.world.tetherCap);
+    this.arena = new Arena(this);
 
     this.dispatcher = new Dispatcher<SimEvent>({
       test: (n, e) => (registry.get(n.type) as FilterBlock).test(this, n, e),
       run: (n, e) => (registry.get(n.type) as ActionBlock).run(this, n, e),
     });
 
-    // Objects: groups first (so refs resolve), then build.
     const imageIds = Object.keys(this.assets);
     for (const n of def.graph.nodes) {
       const spec = registry.get(n.type);
       if (spec?.category !== 'object') continue;
       const params = withDefaults(spec, n.params);
       if (spec.kind === 'counter') {
-        this.counters.set(n.id, { nodeId: n.id, name: params.name, value: Number(params.initial) || 0, show: !!params.show });
+        this.counters.set(n.id, { nodeId: n.id, name: params.name, value: Number(params.initial) || 0, show: !!params.show, countGroup: -1 });
         continue;
       }
       const index = this.groups.length;
@@ -183,14 +242,33 @@ export class Sim {
       this.groups.push(g);
       this.groupByNode.set(n.id, index);
     }
+    // Counters that show a group's size.
+    for (const n of def.graph.nodes) {
+      if (n.type !== 'counter') continue;
+      const c = this.counters.get(n.id)!;
+      const p = withDefaults(registry.get('counter')!, n.params);
+      if (p.source === 'count') c.countGroup = this.groupByNode.get(p.group) ?? -1;
+    }
     for (const g of this.groups) (registry.get(def.graph.nodes.find((n) => n.id === g.nodeId)!.type) as ObjectBlock).build?.(this, g);
+    for (const f of this.hooks.afterBuild) f();
 
     this.triggers = compileGraph(def.graph, registry);
     for (const t of this.triggers) (registry.get(t.type) as TriggerBlock).setup(this, t);
+    if (this.needProgress) for (let i = 0; i < this.world.highWater; i++) if (this.world.alive[i]) this.resetProgress(i);
   }
 
   get time(): number {
     return this.world.time;
+  }
+
+  /** 0..1 through the starting pose; 1 once running. */
+  get readiness(): number {
+    const d = this.settings.startDelay;
+    return d > 0 ? Math.min(1, this.preTime / d) : 1;
+  }
+
+  emit(f: Fx): void {
+    if (this.fxOn && this.fx.length < FX_CAP) this.fx.push(f);
   }
 
   /* --------------------------- Groups ----------------------------- */
@@ -200,7 +278,6 @@ export class Sim {
     return i === undefined ? undefined : this.groups[i];
   }
 
-  /** Membership mask over group indices for a trigger's object inputs. */
   groupMask(nodeIds: string[]): Uint8Array {
     const m = new Uint8Array(Math.max(1, this.groups.length));
     for (const id of nodeIds) {
@@ -210,7 +287,11 @@ export class Sim {
     return m;
   }
 
-  /** Group index of an entity ref, or -1. */
+  /** In play: alive, not queued for removal, not falling off. */
+  inPlay(i: number): boolean {
+    return this.world.alive[i] === 1 && !this.pendingDead[i] && this.fallT[i] === 0;
+  }
+
   groupOfRef(ref: number): number {
     if (isBody(ref)) {
       const i = this.world.indexOf(ref);
@@ -227,11 +308,11 @@ export class Sim {
     return -1;
   }
 
-  /** Live body index for a ref, skipping bodies queued for removal. */
+  /** Live, in-play body index for a ref. */
   bodyIdx(ref: number): number {
     if (!isBody(ref)) return -1;
     const i = this.world.indexOf(ref);
-    return i >= 0 && !this.pendingDead[i] ? i : -1;
+    return i >= 0 && this.inPlay(i) ? i : -1;
   }
 
   refAlive(ref: number): boolean {
@@ -241,14 +322,13 @@ export class Sim {
     return false;
   }
 
-  /** All live entity refs in a group, in a fixed order. */
   membersOf(g: number, out: number[] = []): number[] {
     out.length = 0;
     const w = this.world;
     const info = this.groups[g];
     if (!info) return out;
     if (info.kind === 'ball') {
-      for (let i = 0; i < w.highWater; i++) if (w.alive[i] && !this.pendingDead[i] && w.group[i] === g) out.push(w.handleAt(i));
+      for (let i = 0; i < w.highWater; i++) if (this.inPlay(i) && w.group[i] === g) out.push(w.handleAt(i));
     } else if (info.kind === 'zone') {
       this.zones.forEach((z, i) => { if (z.alive && z.group === g) out.push(zoneRef(i)); });
     } else {
@@ -263,7 +343,7 @@ export class Sim {
     if (!info) return 0;
     let n = 0;
     if (info.kind === 'ball') {
-      for (let i = 0; i < w.highWater; i++) if (w.alive[i] && !this.pendingDead[i] && w.group[i] === g) n++;
+      for (let i = 0; i < w.highWater; i++) if (this.inPlay(i) && w.group[i] === g) n++;
     } else if (info.kind === 'zone') {
       for (const z of this.zones) if (z.alive && z.group === g) n++;
     } else {
@@ -275,8 +355,13 @@ export class Sim {
   countAllBalls(): number {
     const w = this.world;
     let n = 0;
-    for (let i = 0; i < w.highWater; i++) if (w.alive[i] && !this.pendingDead[i]) n++;
+    for (let i = 0; i < w.highWater; i++) if (this.inPlay(i)) n++;
     return n;
+  }
+
+  /** First ball group (spawn controls, camera). */
+  mainBallGroup(): GroupInfo | undefined {
+    return this.groups.find((g) => g.kind === 'ball');
   }
 
   /* ---------------------------- Looks ----------------------------- */
@@ -305,13 +390,13 @@ export class Sim {
 
   /* --------------------------- Spawning --------------------------- */
 
-  /** Creates a ball now. Use only during build or flush. Returns handle or -1. */
-  createBall(g: GroupInfo, x: number, y: number, vx: number, vy: number, from = -1): number {
+  createBall(g: GroupInfo, x: number, y: number, vx: number, vy: number, from = -1, rOverride = 0): number {
     const w = this.world;
     const t = g.template;
-    const r = from >= 0 ? w.r[from] : Math.max(0.5, Number(t.radius) || 6);
+    const r = rOverride > 0 ? rOverride : from >= 0 ? w.r[from] : Math.max(0.5, Number(t.radius) || 6);
     const density = Math.max(0.001, Number(t.density) || 1);
     const collide = t.collide !== false;
+    const mask = collide ? 0xffffffff : 0xfffffffe;
     const h = w.createBody({
       x, y, vx, vy, radius: r,
       mass: density * r * r,
@@ -319,16 +404,22 @@ export class Sim {
       damping: from >= 0 ? w.damping[from] : Number(t.drag) || 0,
       gravityScale: from >= 0 ? w.gravityScale[from] : Number(t.gravity ?? 1),
       layer: 1,
-      mask: collide ? 0xffffffff : 0xfffffffe,
+      mask,
       group: g.index,
+      shape: t.shape === 'square' ? 'box' : 'circle',
     });
     if (h < 0) return -1;
     const i = w.indexOf(h);
+    this.savedMask[i] = mask;
+    this.alpha[i] = 1;
+    this.fallT[i] = 0;
+    this.isCopy[i] = from >= 0 ? 1 : 0;
     if (from >= 0) {
       this.look[i] = this.look[from];
       this.hp[i] = this.hp[from];
       this.maxHp[i] = this.maxHp[from];
       this.nameIdx[i] = this.nameIdx[from];
+      w.shape[i] = w.shape[from];
     } else {
       const look = g.picker ? g.picker.next() : { t: 'solid' as const, c: '#F4F1EA' };
       this.look[i] = this.lookId(look);
@@ -341,11 +432,18 @@ export class Sim {
     }
     this.born[i] = this.time;
     this.pendingDead[i] = 0;
+    this.arena.onCreate(i, from);
+    for (const sl of this.sledges) sl.onCreate(i, from);
+    if (this.needProgress) this.resetProgress(i);
     return h;
   }
 
   queueSpawn(req: SpawnReq): void {
     this.spawnQueue.push(req);
+  }
+
+  scheduleSpawn(at: number, req: SpawnReq): void {
+    this.scheduled.push({ t: at, req });
   }
 
   queueDestroy(ref: number): void {
@@ -357,7 +455,28 @@ export class Sim {
     this.destroyQueue.push(ref);
   }
 
-  /** Spawn position k of n for a ball group, from its template. */
+  /** Take a body out of play: it falls off the screen toward the viewer, then is removed. */
+  dropOut(i: number): void {
+    const w = this.world;
+    if (!this.inPlay(i)) return;
+    this.fallT[i] = Math.max(1e-6, this.time);
+    w.mask[i] = 0;
+    this.emit({ k: 'fall', x: w.x[i], y: w.y[i] });
+  }
+
+  /** Spawn n extra balls of the main group now (viewer controls). Returns how many were queued. */
+  spawnExtra(n: number): number {
+    const g = this.mainBallGroup();
+    if (!g) return 0;
+    const P = { x: 0, y: 0 }, V = { x: 0, y: 0 };
+    for (let k = 0; k < n; k++) {
+      this.spawnPoint(g, g.made + k, Math.max(n, Number(g.template.count) || 1), P);
+      this.spawnVelocity(g, P.x, P.y, V);
+      this.queueSpawn({ group: g.index, x: P.x, y: P.y, vx: V.x, vy: V.y, from: -1 });
+    }
+    return n;
+  }
+
   spawnPoint(g: GroupInfo, k: number, n: number, out: { x: number; y: number }): void {
     const t = g.template;
     const cx = Number(t.x) || 0, cy = Number(t.y) || 0;
@@ -367,6 +486,25 @@ export class Sim {
         const a = this.rng.range(0, dmath.TAU);
         const d = spread * dmath.sqrt(this.rng.next());
         out.x = cx + dmath.cos(a) * d; out.y = cy + dmath.sin(a) * d;
+        return;
+      }
+      case 'spaced': {
+        // Random spots inside a square of half-size `spread`, kept apart from existing balls.
+        const w = this.world;
+        const r = Number(t.radius) || 8;
+        let bx = cx, by = cy, bestD = -1;
+        for (let tries = 0; tries < 40; tries++) {
+          const x = cx + this.rng.range(-spread, spread), y = cy + this.rng.range(-spread, spread);
+          let dmin = Infinity;
+          for (let i = 0; i < w.highWater; i++) {
+            if (!w.alive[i]) continue;
+            const d = (w.x[i] - x) ** 2 + (w.y[i] - y) ** 2;
+            if (d < dmin) dmin = d;
+          }
+          if (dmin > bestD) { bestD = dmin; bx = x; by = y; }
+          if (dmin > (r * 6) ** 2) break;
+        }
+        out.x = bx; out.y = by;
         return;
       }
       case 'circle': {
@@ -404,6 +542,12 @@ export class Sim {
       case 'outward': a = dx || dy ? dmath.atan2(dy, dx) : this.rng.range(0, dmath.TAU); break;
       case 'inward': a = dx || dy ? dmath.atan2(-dy, -dx) : this.rng.range(0, dmath.TAU); break;
       case 'tangent': a = (dx || dy ? dmath.atan2(dy, dx) : 0) + dmath.HALF_PI; break;
+      case 'skew': {
+        // Random, but never close to straight along an axis or diagonal (no ping-pong tracks).
+        const sector = this.rng.int(8);
+        a = (sector * dmath.PI) / 4 + this.rng.range(0.2, dmath.PI / 4 - 0.2);
+        break;
+      }
       default: a = this.rng.range(0, dmath.TAU);
     }
     out.x = dmath.cos(a) * speed;
@@ -412,7 +556,6 @@ export class Sim {
 
   /* ---------------------------- Values ---------------------------- */
 
-  /** Read a property of an entity. NaN if it doesn't apply. */
   prop(ref: number, name: string): number {
     const w = this.world;
     if (isBody(ref)) {
@@ -427,6 +570,10 @@ export class Sim {
         case 'bounciness': return w.restitution[i];
         case 'x': return w.x[i];
         case 'y': return w.y[i];
+        case 'dist': return dmath.sqrt(w.x[i] * w.x[i] + w.y[i] * w.y[i]);
+        case 'stall': return this.time - this.progBestT[i];
+        case 'copy': return this.isCopy[i];
+        case 'shield': return this.arena.shield[i];
         default: return NaN;
       }
     }
@@ -434,16 +581,68 @@ export class Sim {
       const c = colliderOf(ref);
       if (!w.colAlive[c]) return NaN;
       if (name === 'spin') return (this.colMotion[c].rate * 180) / dmath.PI;
-      if (name === 'size') return this.colRadius[c];
+      if (name === 'size') return w.colRadial[c] ? w.colRingR[c] : this.colRadius[c];
       if (name === 'bounciness') return w.colRest[c];
     }
     return NaN;
+  }
+
+  private resetProgress(i: number): void {
+    const w = this.world;
+    this.progAng[i] = dmath.atan2(w.y[i], w.x[i]);
+    this.progUnwrap[i] = 0;
+    this.progBest[i] = 0;
+    this.progBestT[i] = this.time;
+  }
+
+  private trackProgress(): void {
+    const w = this.world;
+    for (let i = 0; i < w.highWater; i++) {
+      if (!this.inPlay(i)) continue;
+      const a = dmath.atan2(w.y[i], w.x[i]);
+      let d = a - this.progAng[i];
+      if (d > dmath.PI) d -= dmath.TAU; else if (d < -dmath.PI) d += dmath.TAU;
+      this.progAng[i] = a;
+      this.progUnwrap[i] += d;
+      const p = Math.abs(this.progUnwrap[i]);
+      if (p > this.progBest[i] + 0.15) { this.progBest[i] = p; this.progBestT[i] = this.time; }
+    }
+  }
+
+  /** Fraction of a container's area covered by visible balls (0..1+). */
+  fillRatio(g: number): number {
+    const w = this.world;
+    let cx = 0, cy = 0, R = 0, found = false;
+    for (let c = 0; c < w.colAlive.length && !found; c++) {
+      if (!w.colAlive[c] || w.colGroup[c] !== g) continue;
+      cx = w.colX[c]; cy = w.colY[c];
+      R = (w.colRadial[c] ? w.colRingR[c] : this.colRadius[c]) * w.colScale[c];
+      found = true;
+    }
+    if (!found) {
+      const z = this.zones.find((zz) => zz.alive && zz.group === g);
+      if (!z) return 0;
+      cx = z.x; cy = z.y; R = z.shape === 'circle' ? z.r : Math.min(z.w, z.h) / 2;
+    }
+    if (R <= 0) return 0;
+    let area = 0;
+    const R2 = R * R;
+    for (let i = 0; i < w.highWater; i++) {
+      if (!this.inPlay(i) || w.frozen[i]) continue;
+      const dx = w.x[i] - cx, dy = w.y[i] - cy;
+      if (dx * dx + dy * dy < R2) area += w.r[i] * w.r[i];
+    }
+    return area / R2;
   }
 
   /* --------------------------- Counters --------------------------- */
 
   counter(nodeId: string): CounterInfo | undefined {
     return this.counters.get(nodeId);
+  }
+
+  counterValue(c: CounterInfo): number {
+    return c.countGroup >= 0 ? this.countGroup(c.countGroup) : c.value;
   }
 
   /* --------------------------- Tethers ---------------------------- */
@@ -466,7 +665,10 @@ export class Sim {
   /* ----------------------------- End ------------------------------ */
 
   end(label: string): void {
-    if (!this.outcome) this.outcome = { label, time: this.time };
+    if (!this.outcome) {
+      this.outcome = { label, time: this.time };
+      this.emit({ k: 'end', label });
+    }
   }
 
   /* ----------------------------- Step ----------------------------- */
@@ -477,14 +679,12 @@ export class Sim {
     return e;
   }
 
-  /** Fire a trigger. `key` is the cooldown key (entity ref, or -1 for sim-wide). */
   fire(t: CompiledTrigger, self: number, other = NONE, px = 0, py = 0, nx = 0, ny = 0, tether = NONE, speed = 0): void {
     if (this.outcome) return;
     if (self !== NONE && !this.refAlive(self)) return;
     this.dispatcher.fire(t, self, this.time, this.fillEvent(self, other, px, py, nx, ny, tether, speed));
   }
 
-  /** Fire for a body that was just destroyed (self is no longer alive). */
   fireDead(t: CompiledTrigger, self: number, px: number, py: number): void {
     if (this.outcome) return;
     this.dispatcher.fire(t, self, this.time, this.fillEvent(self, NONE, px, py, 0, 0, NONE, 0));
@@ -492,15 +692,25 @@ export class Sim {
 
   step(): void {
     const w = this.world;
-    this.applyMotion();
-    w.step();
-    if (this.outcome) {
-      this.sinceEnd += this.dt;
+    if (this.preTime < this.settings.startDelay) {
+      this.preTime += this.dt;
       return;
     }
+    this.applyMotion();
+    for (const sl of this.sledges) sl.beforeStep();
+    w.step();
+    this.updateFalling();
+    for (const sl of this.sledges) sl.afterStep();
+    this.arena.step();
+    if (this.fxOn) this.collectContactFx();
+    if (this.outcome) {
+      this.sinceEnd += this.dt;
+      this.flush();
+      return;
+    }
+    if (this.needProgress) this.trackProgress();
     this.dispatcher.beginStep();
 
-    // Events produced by last step's structural changes.
     if (this.spawnedEv.length || this.destroyedEv.length || this.tetherLostEv.length) {
       const sp = this.spawnedEv, de = this.destroyedEv, tl = this.tetherLostEv;
       this.spawnedEv = []; this.destroyedEv = []; this.tetherLostEv = [];
@@ -520,8 +730,31 @@ export class Sim {
         else if (kind === CONTACT_TETHER) { for (const f of ht) f(w.cA[k], w.cB[k], w.cC[k], k); }
       }
     }
+    for (const sl of this.sledges) sl.fireCrushes();
 
     this.flush();
+  }
+
+  private collectContactFx(): void {
+    const w = this.world;
+    this.fxBounces = 0;
+    for (let k = 0; k < w.contactCount && this.fxBounces < 24; k++) {
+      const kind = w.cKind[k];
+      if (kind === CONTACT_TETHER) continue;
+      const s = w.cSpeed[k];
+      if (s < 40) continue;
+      const i = w.cA[k];
+      this.fxBounces++;
+      this.emit({ k: kind === CONTACT_WALL ? 'bounce' : 'hit', x: w.cPx[k], y: w.cPy[k], s, r: w.r[i], l: this.look[i] });
+    }
+  }
+
+  private updateFalling(): void {
+    const w = this.world;
+    for (let i = 0; i < w.highWater; i++) {
+      if (!w.alive[i] || this.fallT[i] === 0) continue;
+      if (this.time - this.fallT[i] > 1.4 && !this.pendingDead[i]) this.queueDestroy(w.handleAt(i));
+    }
   }
 
   private flush(): void {
@@ -533,7 +766,6 @@ export class Sim {
         if (isBody(ref)) {
           const i = w.indexOf(ref);
           if (i < 0) continue;
-          // Bodies tethered to this one lose a tether.
           if (w.tetherCount[i] > 0) {
             for (let t = 0; t < w.tetherHigh; t++) {
               if (w.tAlive[t] && w.tKind[t] === 2 && w.tRef[t] === i && w.tBody[t] !== i) this.tetherLostEv.push(w.handleAt(w.tBody[t]));
@@ -544,6 +776,7 @@ export class Sim {
           w.destroyIndex(i);
           this.pendingDead[i] = 0;
           this.nameIdx[i] = -1;
+          this.fallT[i] = 0;
           for (const f of this.hooks.freed) f(i);
         } else if (isCollider(ref)) {
           const c = colliderOf(ref);
@@ -551,12 +784,22 @@ export class Sim {
           for (let t = 0; t < w.tetherHigh; t++) {
             if (w.tAlive[t] && w.tKind[t] === 1 && w.tRef[t] === c) this.tetherLostEv.push(w.handleAt(w.tBody[t]));
           }
+          if (this.fxOn) this.emitShatter(c);
           w.removeCollider(c);
         } else if (isZone(ref)) {
           const z = this.zones[zoneOf(ref)];
           if (z) z.alive = false;
         }
       }
+    }
+    if (this.scheduled.length) {
+      const now = this.time;
+      const keep: { t: number; req: SpawnReq }[] = [];
+      for (const it of this.scheduled) {
+        if (it.t <= now + 1e-9) this.spawnQueue.push(it.req);
+        else keep.push(it);
+      }
+      this.scheduled = keep;
     }
     if (this.spawnQueue.length) {
       const q = this.spawnQueue;
@@ -565,10 +808,34 @@ export class Sim {
         const g = this.groups[s.group];
         if (!g) continue;
         const from = s.from >= 0 && w.alive[s.from] ? s.from : -1;
-        const h = this.createBall(g, s.x, s.y, s.vx, s.vy, from);
-        if (h >= 0) this.spawnedEv.push({ h, g: s.group });
+        const h = this.createBall(g, s.x, s.y, s.vx, s.vy, from, s.r ?? 0);
+        if (h >= 0) {
+          this.spawnedEv.push({ h, g: s.group });
+          const i = w.indexOf(h);
+          if (this.alpha[i] > 0) this.emit({ k: 'pop', x: s.x, y: s.y, l: this.look[i] });
+        }
       }
     }
+  }
+
+  /** World-space geometry of a collider for the dissolve effect. */
+  private emitShatter(c: number): void {
+    const w = this.world;
+    const arcs: number[] = [], segs: number[] = [];
+    const P = { x: 0, y: 0 }, Q = { x: 0, y: 0 };
+    for (let p = w.colPieceStart[c]; p < w.colPieceStart[c] + w.colPieceCount[c]; p++) {
+      if (!w.pAlive[p]) continue;
+      const b = p * 12, D = w.pData, sc = w.colScale[c];
+      if (w.pKind[p] === 0) {
+        w.colliderToWorld(c, D[b] * sc, D[b + 1] * sc, P);
+        w.colliderToWorld(c, D[b + 2] * sc, D[b + 3] * sc, Q);
+        segs.push(P.x, P.y, Q.x, Q.y, w.pHt[p]);
+      } else {
+        w.colliderToWorld(c, D[b] * sc, D[b + 1] * sc, P);
+        arcs.push(P.x, P.y, D[b + 2] * sc, dmath.atan2(D[b + 5], D[b + 4]) + w.colAngle[c], D[b + 3], w.pHt[p]);
+      }
+    }
+    this.emit({ k: 'shatter', x: w.colX[c], y: w.colY[c], color: this.colColor[c] ?? '#9AA4B1', arcs, segs, n: 0 });
   }
 
   private applyMotion(): void {
@@ -576,7 +843,7 @@ export class Sim {
     const t1 = this.time + this.dt;
     for (let c = 0; c < this.colMotion.length; c++) {
       const m = this.colMotion[c];
-      if (!w.colAlive[c] || m.type === 'none' || m.type === 'spin') continue;
+      if (!m || !w.colAlive[c] || m.type === 'none' || m.type === 'spin') continue;
       const s = dmath.sin((dmath.TAU * t1) / m.period + m.phase);
       if (m.type === 'swing') {
         const target = m.base + m.amp * s;
@@ -586,9 +853,76 @@ export class Sim {
         w.setColliderVelocity(c, (tx - w.colX[c]) / this.dt, (ty - w.colY[c]) / this.dt, 0);
       }
     }
+    for (const ci of this.closeIn) this.stepCloseIn(ci);
   }
 
-  /** Set a collider's spin rate (rad/s), keeping other motion types intact. */
+  /** The innermost ring of a group closes in around the ball after a delay, keeping its gaps a fixed width. */
+  private stepCloseIn(ci: Sim['closeIn'][number]): void {
+    const w = this.world;
+    while (ci.ptr < ci.order.length && !w.colAlive[ci.order[ci.ptr]]) ci.ptr++;
+    if (ci.ptr >= ci.order.length) return;
+    const c = ci.order[ci.ptr];
+    if (ci.cur !== c) {
+      if (ci.cur >= 0 && w.colAlive[ci.cur]) w.setColliderVelocity(ci.cur, 0, 0, w.colW[ci.cur]);
+      ci.cur = c;
+      ci.since = this.time;
+      ci.px = NaN;
+    }
+    if (this.time - ci.since < ci.delay) return;
+    const meta = this.ringMeta[c];
+    if (!meta) return;
+    // Pivot: where the ball is when closing starts.
+    if (Number.isNaN(ci.px)) {
+      let found = false;
+      for (let i = 0; i < w.highWater; i++) {
+        if (!this.inPlay(i)) continue;
+        ci.px = w.x[i]; ci.py = w.y[i]; found = true;
+        break;
+      }
+      if (!found) return;
+    }
+    const R = w.colRingR[c];
+    const maxGap = Math.max(...meta.gaps.map((g) => g.len), 1);
+    let ballR = 10;
+    for (let i = 0; i < w.highWater; i++) if (this.inPlay(i)) { ballR = w.r[i]; break; }
+    const minR = Math.max(maxGap * 0.75, ballR * 2.6);
+    if (R <= minR * 1.001) {
+      // Clamped tight around the ball: twist the opening down so it drops out.
+      if (w.colGrowth[c] !== 0) this.reshapeRing(c, meta, R, 0);
+      const gapAbs = meta.gaps[0].at + w.colAngle[c];
+      let diff = (dmath.HALF_PI - gapAbs) % dmath.TAU;
+      if (diff > dmath.PI) diff -= dmath.TAU;
+      if (diff < -dmath.PI) diff += dmath.TAU;
+      const spin = Math.abs(diff) < 0.02 ? 0 : Math.sign(diff) * Math.min(3, Math.abs(diff) * 4 + 0.5);
+      w.setColliderVelocity(c, 0, 0, spin);
+      return;
+    }
+    const Rn = Math.max(minR, R * (1 - ci.rate * this.dt));
+    const k = Rn / R;
+    const nx = ci.px + (w.colX[c] - ci.px) * k, ny = ci.py + (w.colY[c] - ci.py) * k;
+    w.setColliderVelocity(c, (nx - w.colX[c]) / this.dt, (ny - w.colY[c]) / this.dt, 0);
+    this.reshapeRing(c, meta, Rn, (Rn - R) / R / this.dt);
+  }
+
+  /** Recompute a ring's arc pieces for radius R with fixed-length gaps. */
+  reshapeRing(c: number, meta: RingMeta, R: number, growth: number): void {
+    const w = this.world;
+    const gs = meta.gaps
+      .map((g) => {
+        const wdt = Math.min(g.len / R, (dmath.TAU * 0.9) / meta.gaps.length);
+        let s = (g.at - wdt / 2) % dmath.TAU;
+        if (s < 0) s += dmath.TAU;
+        return { s, wdt };
+      })
+      .sort((a, b) => a.s - b.s);
+    let p = w.colPieceStart[c];
+    for (let k = 0; k < gs.length && p < w.colPieceStart[c] + w.colPieceCount[c]; k++) {
+      const end = gs[k].s + gs[k].wdt;
+      const next = k + 1 < gs.length ? gs[k + 1].s : gs[0].s + dmath.TAU;
+      w.setArc(p++, R, end, next - end, growth);
+    }
+  }
+
   setSpin(c: number, rate: number): void {
     const m = this.colMotion[c];
     if (!m) return;
@@ -599,15 +933,15 @@ export class Sim {
     }
   }
 
-  /** Register a collider built by an object block. */
-  addCollider(g: GroupInfo, kind: string, def: Parameters<World['addCollider']>[0], radius: number, motion?: Partial<Motion>): number {
+  addCollider(g: GroupInfo, kind: string, def: Parameters<World['addCollider']>[0], radius: number, motion?: Partial<Motion>, color?: string): number {
     const m: Motion = { type: 'none', rate: 0, base: def.angle ?? 0, amp: 0, period: 1, phase: 0, bx: def.x ?? 0, by: def.y ?? 0, dx: 1, dy: 0, ...motion };
-    const rotates = m.type === 'swing' || m.type === 'spin' || (def.angularVelocity ?? 0) !== 0;
+    const rotates = m.type === 'swing' || m.type === 'spin' || (def.angularVelocity ?? 0) !== 0 || !!def.rotates;
     const id = this.world.addCollider({ ...def, rotates, group: g.index, layer: 2, angularVelocity: m.type === 'spin' ? m.rate : def.angularVelocity });
     this.colKind[id] = kind;
-    this.colColor[id] = g.color;
+    this.colColor[id] = color ?? g.color;
     this.colRadius[id] = radius;
     this.colMotion[id] = m;
+    this.colMaterial[id] = g.params.material ?? 'glow';
     return id;
   }
 
@@ -619,8 +953,8 @@ export class Sim {
     for (let c = 0; c < w.colAlive.length; c++) {
       if (!w.colAlive[c]) continue;
       const m = this.colMotion[c];
-      if (w.colRotates[c] || m.type === 'slide') {
-        const reach = Math.max(Math.abs(w.colX[c]), Math.abs(w.colY[c])) + w.colBound[c] + (m.type === 'slide' ? m.amp : 0);
+      if (w.colRotates[c] || m?.type === 'slide' || w.colRadial[c]) {
+        const reach = Math.max(Math.abs(w.colX[c]), Math.abs(w.colY[c])) + w.colBound[c] + (m?.type === 'slide' ? m.amp : 0);
         if (reach > r) r = reach;
         continue;
       }
@@ -646,6 +980,17 @@ export class Sim {
       r = Math.max(r, Math.abs(w.x[i]) + w.r[i], Math.abs(w.y[i]) + w.r[i]);
     }
     return r;
+  }
+
+  /** Point the follow camera aims at: the first ball in play. */
+  focus(out: { x: number; y: number }): boolean {
+    const w = this.world;
+    for (let i = 0; i < w.highWater; i++) {
+      if (!this.inPlay(i)) continue;
+      out.x = w.x[i]; out.y = w.y[i];
+      return true;
+    }
+    return false;
   }
 
   spec(type: string): BlockSpec | undefined {

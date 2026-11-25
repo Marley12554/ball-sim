@@ -4,8 +4,9 @@ import type { Look, LookPreset, LookSetting, PatternKind } from './types';
 
 interface CountryRow { code: string; name: string; iso: boolean }
 
+const SKIP = new Set(['um', 'hm', 'io', 'tf', 'gs', 'sj', 'bq', 'pm', 'vc', 'sh', 'cc', 'mf', 'bl', 'aq', 'bv']);
 export const COUNTRIES: { code: string; name: string }[] = (countriesRaw as CountryRow[])
-  .filter((c) => c.iso)
+  .filter((c) => c.iso && !SKIP.has(c.code) && c.name.length <= 24)
   .map((c) => ({ code: c.code, name: c.name }))
   .sort((a, b) => a.name.localeCompare(b.name));
 
@@ -113,6 +114,7 @@ export function lookKey(l: Look): string {
 
 /** Display name for an object with this look. */
 export function lookName(l: Look): string | null {
+  if (l.t === 'imp') return 'The Imp';
   return l.t === 'flag' ? nameOfCountry(l.code) : null;
 }
 
@@ -124,6 +126,7 @@ export function lookColor(l: Look): string {
     case 'pattern': return l.c[0];
     case 'flag': return FLAG_TINT[l.code] ?? '#E7E9EC';
     case 'image': return '#E7E9EC';
+    case 'imp': return '#A855F7';
   }
 }
 

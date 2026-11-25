@@ -4,6 +4,7 @@ import { drawLook, flagUrl, onImagesChanged } from '../../render/sprites';
 import { COUNTRIES, LOOK_PRESETS, LookPicker, PALETTE, PATTERNS } from '../../sim/looks';
 import type { Look, LookSetting, LookPreset } from '../../sim/types';
 import { colorField, numberField, segField, selectField } from './fields';
+import { loadImages, addImage } from '../images';
 
 export interface LookEditorOpts {
   value: LookSetting;
@@ -114,11 +115,15 @@ export function lookEditor(o: LookEditorOpts): HTMLElement {
       root.append(search, list);
     } else if (look.t === 'image') {
       const ids = Object.keys(o.assets);
+      const inSim = new Set(ids.map((id) => o.assets[id]));
+      const lib = loadImages().filter((img) => !inSim.has(img.data));
       root.append(h('div', { class: 'assets' },
         ...ids.map((id) => h('button', { class: `asset${id === look.asset ? ' on' : ''}`, onclick: () => setLook({ t: 'image', asset: id }, true, true) },
           h('img', { src: o.assets[id], alt: '' }))),
+        ...lib.map((img) => h('button', { class: 'asset', title: 'From your images', onclick: () => setLook({ t: 'image', asset: o.addAsset(img.data) }, true, true) },
+          h('img', { src: img.data, alt: '' }))),
         h('button', { class: 'asset', title: 'Upload image', style: { display: 'grid', placeItems: 'center', borderColor: 'var(--line-2)' }, onclick: async () => {
-          const id = await uploadImage(o.addAsset);
+          const id = await uploadImage((data) => { addImage(data); return o.addAsset(data); });
           if (id) setLook({ t: 'image', asset: id }, true, true);
         } }, icon('plus', 18))));
     }

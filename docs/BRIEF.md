@@ -56,6 +56,18 @@ Dark, clean, modern, refined. Techno, but not neon or noisy. Shares a general th
 - Almost none. No instructional captions explaining a drag-and-drop canvas.
 - When text is needed (a toast, a label), write it like a person would: short, plain sentences. No semicolon chains, no choppy robotic phrasing.
 
+## Round 2 decisions (user feedback)
+
+- Fun to watch, not a lab tool: color everywhere (palette gradients, glow), neutral graphite background with drifting light, grain and light pulses, particles, sound on everything.
+- Watch = a fresh random sim of that mode every time. Short codes (`RE2-4F9K2` = mode, variant, seed) rebuild an exact sim. Long codes/links for custom sims.
+- Downward gravity in every mode except Arena (top-down). Radial gravity only as an editor option. All containers are circles except Arena.
+- Balls hold still in their starting pose for about 1.5 s before anything moves.
+- Entering a sim is a transition: the card expands to fill the screen with a bloom and grid sweep.
+- Modes: Ring Escape (Classic, Gauntlet 1,000 rings, Gauntlet 10K), Leak, Doubling Sledge, Spiral Drop, Mitosis, Arena (Duel, Free-for-all, Teams, Boss, Weapons Duel, Weapons Brawl), Tether Battle, Growth.
+- Arena: squares, HP 10, both take 1 on contact, powerups (red +1 damage 2 s, green heal 1, cyan shield 1, magenta teleport), stackable, spawning every 5 to 10 s. Health cards on the sides. Sudden death after a minute (fighters grow and speed up).
+- Weapons: sword, spear, sledgehammer, match (burn + ground flames), lightning rod, shield. Each grows stronger with hits.
+- No music yet.
+
 ## Build order
 
 1. Physics core. **Done.**

@@ -87,30 +87,31 @@ export class SpriteCache {
 
   constructor(private assets: () => Record<string, string>) {}
 
-  get(look: Look, diameterPx: number): HTMLCanvasElement {
+  get(look: Look, diameterPx: number, square = false): HTMLCanvasElement {
     if (this.seenVersion !== version) {
       this.cache.clear();
       this.seenVersion = version;
     }
     const size = bucket(diameterPx);
-    const key = `${size}|${JSON.stringify(look)}`;
+    const key = `${size}|${square ? 's' : 'c'}|${JSON.stringify(look)}`;
     let c = this.cache.get(key);
     if (c) return c;
     c = document.createElement('canvas');
     c.width = c.height = size;
     const g = c.getContext('2d')!;
-    const ready = drawLook(g, look, size, this.assets());
+    const ready = drawLook(g, look, size, this.assets(), square);
     if (ready) this.cache.set(key, c);
     return c;
   }
 }
 
 /** Draws a look into a size x size circle. Returns false if an image is still loading. */
-export function drawLook(g: CanvasRenderingContext2D, look: Look, size: number, assets: Record<string, string>): boolean {
+export function drawLook(g: CanvasRenderingContext2D, look: Look, size: number, assets: Record<string, string>, square = false): boolean {
   const r = size / 2;
   g.save();
   g.beginPath();
-  g.arc(r, r, r, 0, Math.PI * 2);
+  if (square) roundRectPath(g, 0, 0, size, size, size * 0.16);
+  else g.arc(r, r, r, 0, Math.PI * 2);
   g.closePath();
   g.clip();
   let ready = true;
@@ -136,6 +137,9 @@ export function drawLook(g: CanvasRenderingContext2D, look: Look, size: number, 
     case 'pattern':
       drawPattern(g, look.p, look.c, look.scale, look.angle, size);
       break;
+    case 'imp':
+      drawImp(g, size);
+      break;
     case 'flag':
     case 'image': {
       const key = look.t === 'flag' ? `flag:${look.code}` : `img:${look.asset}`;
@@ -155,14 +159,82 @@ export function drawLook(g: CanvasRenderingContext2D, look: Look, size: number, 
       break;
     }
   }
+  // Soft top light so every ball reads as a solid object.
+  if (look.t !== 'imp') {
+    const shine = g.createRadialGradient(r * 0.7, r * 0.55, 0, r * 0.7, r * 0.55, r * 1.2);
+    shine.addColorStop(0, 'rgba(255,255,255,0.28)');
+    shine.addColorStop(0.5, 'rgba(255,255,255,0.04)');
+    shine.addColorStop(1, 'rgba(0,0,0,0.22)');
+    g.fillStyle = shine;
+    g.fillRect(0, 0, size, size);
+  }
   g.restore();
-  // Hairline rim so light looks still read against each other.
   g.beginPath();
-  g.arc(r, r, r - 0.5, 0, Math.PI * 2);
+  if (square) roundRectPath(g, 0.5, 0.5, size - 1, size - 1, size * 0.16);
+  else g.arc(r, r, r - 0.5, 0, Math.PI * 2);
   g.strokeStyle = 'rgba(0,0,0,0.35)';
   g.lineWidth = 1;
   g.stroke();
   return ready;
+}
+
+export function roundRectPath(g: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {
+  g.moveTo(x + r, y);
+  g.arcTo(x + w, y, x + w, y + h, r);
+  g.arcTo(x + w, y + h, x, y + h, r);
+  g.arcTo(x, y + h, x, y, r);
+  g.arcTo(x, y, x + w, y, r);
+}
+
+/** The boss: a grinning purple imp with horns, drawn flat with soft shading. */
+function drawImp(g: CanvasRenderingContext2D, size: number): void {
+  const s = size, r = s / 2;
+  const face = g.createRadialGradient(r * 0.8, r * 0.7, r * 0.1, r, r, r);
+  face.addColorStop(0, '#C084FC');
+  face.addColorStop(0.7, '#9333EA');
+  face.addColorStop(1, '#6B21A8');
+  g.fillStyle = face;
+  g.fillRect(0, 0, s, s);
+  // Horns live outside the clip in the renderer; here a hint of brow shadow.
+  g.fillStyle = 'rgba(40,0,70,0.35)';
+  g.beginPath();
+  g.ellipse(r, r * 0.62, r * 0.7, r * 0.18, 0, 0, Math.PI * 2);
+  g.fill();
+  // Eyes
+  for (const sx of [-1, 1]) {
+    const ex = r + sx * r * 0.34, ey = r * 0.8;
+    g.fillStyle = '#FFFFFF';
+    g.beginPath();
+    g.ellipse(ex, ey, r * 0.17, r * 0.13, sx * -0.35, 0, Math.PI * 2);
+    g.fill();
+    g.fillStyle = '#1F0A33';
+    g.beginPath();
+    g.arc(ex + sx * r * 0.03, ey + r * 0.02, r * 0.075, 0, Math.PI * 2);
+    g.fill();
+    // Angry brows
+    g.strokeStyle = '#3B0764';
+    g.lineWidth = r * 0.08;
+    g.lineCap = 'round';
+    g.beginPath();
+    g.moveTo(ex - sx * r * 0.2, ey - r * 0.24);
+    g.lineTo(ex + sx * r * 0.14, ey - r * 0.12);
+    g.stroke();
+  }
+  // Grin
+  g.fillStyle = '#2E1065';
+  g.beginPath();
+  g.moveTo(r - r * 0.5, r * 1.18);
+  g.quadraticCurveTo(r, r * 1.75, r + r * 0.5, r * 1.18);
+  g.quadraticCurveTo(r, r * 1.38, r - r * 0.5, r * 1.18);
+  g.fill();
+  g.fillStyle = '#FFFFFF';
+  g.beginPath();
+  g.moveTo(r - r * 0.4, r * 1.24);
+  g.quadraticCurveTo(r, r * 1.42, r + r * 0.4, r * 1.24);
+  g.lineTo(r + r * 0.36, r * 1.3);
+  g.quadraticCurveTo(r, r * 1.5, r - r * 0.36, r * 1.3);
+  g.closePath();
+  g.fill();
 }
 
 function drawPattern(g: CanvasRenderingContext2D, p: string, c: [string, string], scale: number, angle: number, size: number) {

@@ -24,8 +24,13 @@ export const BODY_PROPS = [
   { value: 'speed', label: 'Speed' },
   { value: 'size', label: 'Size' },
   { value: 'hp', label: 'HP' },
+  { value: 'shield', label: 'Shield' },
   { value: 'tethers', label: 'Tethers' },
   { value: 'age', label: 'Age' },
+  { value: 'dist', label: 'Distance from center' },
+  { value: 'y', label: 'Height (Y)' },
+  { value: 'stall', label: 'Time without progress' },
+  { value: 'copy', label: 'Is a copy (0/1)' },
 ];
 
 export const CMP: ParamSpec = {

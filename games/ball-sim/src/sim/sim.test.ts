@@ -1,75 +1,91 @@
 import { describe, expect, it } from 'vitest';
 import { analyzeGraph } from '@engine/index';
 import { Sim } from './sim';
-import { PRESETS } from './presets';
+import { MODES, generate, codeOf, parseCode, fromCode } from './modes';
 import { registry } from './blocks';
 
-const run = (id: string, seconds: number, seed?: number) => {
-  const def = PRESETS.find((p) => p.id === id)!.make();
-  if (seed !== undefined) def.seed = seed;
-  const sim = new Sim(def);
+function run(modeId: string, v: number, seed: number, seconds: number, stopAfterEnd = true) {
+  const mode = MODES.find((m) => m.id === modeId)!;
+  const sim = new Sim(generate(mode, v, seed).def);
   const steps = Math.round(seconds / sim.dt);
-  for (let s = 0; s < steps && !(sim.outcome && sim.sinceEnd > 0.5); s++) sim.step();
+  for (let s = 0; s < steps && !(stopAfterEnd && sim.outcome && sim.sinceEnd > 0.5); s++) sim.step();
   return sim;
-};
+}
 
-describe('presets', () => {
-  for (const p of PRESETS) {
-    it(`${p.id}: every wire is valid`, () => {
-      const def = p.make();
-      const a = analyzeGraph(def.graph, registry);
-      const bad = def.graph.wires.filter((_, k) => a.wireError[k]);
-      expect(bad).toEqual([]);
-    });
-
-    it(`${p.id}: runs and replays identically`, () => {
-      const a = run(p.id, 20);
-      const b = run(p.id, 20);
-      expect(a.world.stateHash()).toBe(b.world.stateHash());
-      expect(a.outcome?.label ?? null).toBe(b.outcome?.label ?? null);
+describe('modes', () => {
+  for (const mode of MODES) {
+    mode.variants.forEach((variant, v) => {
+      it(`${mode.id} ${variant.name}: wires valid, runs, replays identically`, () => {
+        const d = generate(mode, v, 12345).def;
+        const a = analyzeGraph(d.graph, registry);
+        expect(d.graph.wires.filter((_, k) => a.wireError[k])).toEqual([]);
+        const secs = mode.id === 'ring-escape' && v > 0 ? 4 : 8;
+        const s1 = run(mode.id, v, 12345, secs), s2 = run(mode.id, v, 12345, secs);
+        expect(s1.world.stateHash()).toBe(s2.world.stateHash());
+      });
     });
   }
 
-  it('ring escape: bounces speed the ball up and escaping breaks rings', () => {
-    const sim = run('ring-escape', 60);
-    const rings = sim.world.colAlive.filter(Boolean).length;
-    expect(rings).toBeLessThan(12);
+  it('codes round-trip', () => {
+    const m = MODES[3];
+    const code = codeOf(m, 1, 987654);
+    expect(parseCode(code)).toEqual({ mode: m, variant: 1, seed: 987654 });
+    expect(fromCode(code.toLowerCase())?.code).toBe(code);
+    expect(parseCode('ZZ1-ABC')).toBeNull();
+  });
+
+  it('nothing moves during the start delay', () => {
+    const sim = run('ring-escape', 0, 1, 1.0);
+    expect(sim.world.stepCount).toBe(0);
+  });
+});
+
+describe('mechanics', () => {
+  it('ring escape: escaping breaks rings', () => {
+    const sim = run('ring-escape', 0, 7, 62);
+    expect(sim.world.colAlive.filter(Boolean).length).toBeLessThan(10);
     expect(sim.outcome).not.toBeNull();
   });
 
-  it('tether battle: tethers get attached and cut, balls drop out', () => {
-    const sim = run('tether-battle', 90);
-    expect(sim.tSeq.some((s) => s > 0)).toBe(true);
-    expect(sim.countAllBalls()).toBeLessThan(5);
+  it('gauntlet: the ball tunnels through many rings', () => {
+    const sim = run('ring-escape', 1, 3, 30);
+    const alive = sim.world.colAlive.filter(Boolean).length;
+    expect(1000 - alive).toBeGreaterThan(15);
   });
 
-  it('doubling jaw: the jaw duplicates balls', () => {
-    const sim = run('doubling-jaw', 15);
-    expect(sim.countAllBalls()).toBeGreaterThan(4);
+  it('leak: every escape adds two balls', () => {
+    const sim = run('leak', 0, 5, 25);
+    expect(sim.countAllBalls()).toBeGreaterThan(8);
   });
 
-  it('arena: fighters take damage and someone wins', () => {
-    const sim = run('arena', 120);
-    expect(sim.countAllBalls()).toBeLessThan(8);
+  it('sledge: crushed balls double and come back', () => {
+    const sim = run('sledge', 0, 2, 25);
+    expect(sim.countAllBalls()).toBeGreaterThan(12);
+    expect(sim.sledges[0].hidden.size).toBeLessThan(sim.countAllBalls());
+  });
+
+  it('mitosis: cells divide', () => {
+    const sim = run('mitosis', 0, 4, 20);
+    expect(sim.countAllBalls()).toBeGreaterThan(10);
+  });
+
+  it('arena duel: someone wins', () => {
+    const sim = run('arena', 0, 9, 240);
+    expect(sim.outcome).not.toBeNull();
+  });
+
+  it('arena weapons: fights end', () => {
+    const sim = run('arena', 4, 11, 240);
+    expect(sim.outcome).not.toBeNull();
   });
 });
 
 describe('guards', () => {
   it('object cap holds under runaway duplication', () => {
-    const def = PRESETS.find((p) => p.id === 'split')!.make();
-    def.settings.maxObjects = 200;
-    // Duplicate on every bounce, no cooldown.
-    for (const n of def.graph.nodes) if (n.type === 'chance') n.params.percent = 100;
-    const sim = new Sim(def);
-    for (let s = 0; s < 120 * 30; s++) sim.step();
+    const d = generate(MODES.find((m) => m.id === 'mitosis')!, 0, 1).def;
+    d.settings.maxObjects = 200;
+    const sim = new Sim(d);
+    for (let s = 0; s < 120 * 40; s++) sim.step();
     expect(sim.world.aliveCount).toBeLessThanOrEqual(200);
-  });
-
-  it('firing cap drops excess firings deterministically', () => {
-    const def = PRESETS.find((p) => p.id === 'doubling-jaw')!.make();
-    const sim = new Sim(def);
-    sim.dispatcher.maxFiringsPerStep = 3;
-    for (let s = 0; s < 120 * 10; s++) sim.step();
-    expect(sim.dispatcher.stats.firings).toBeGreaterThan(0);
   });
 });

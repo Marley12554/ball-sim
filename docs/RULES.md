@@ -23,7 +23,10 @@ Object blocks wire into triggers through the round object port.
 | Wall | box, line or arc, with motion (still, spin, swing, slide) |
 | Spiral | inner radius, spacing, turns, spin |
 | Zone | circle or box area that only detects |
-| Counter | named number, optionally shown on screen |
+| Counter | named number, or the live count of a group, optionally shown on screen |
+| Sledge | two-headed titanium hammer with stops. Swallows balls caught in its closing gap and gives them back as it pulls away |
+| Powerups | spawns red/green/cyan/magenta pickups on a timer. Toggle which ones appear |
+| Weapons | gives every ball in a group a spinning weapon (or a random one each) |
 
 ## Triggers
 
@@ -31,8 +34,10 @@ Every trigger also has **Cooldown** (per object) and **Max fires** (per object, 
 
 | block | gives | params |
 |---|---|---|
+| Fills up | point | container, percent full, for how long |
+| Crushed | self + point | (by a sledge) |
 | Start | nothing | |
-| Every | self + point with objects, else nothing | interval |
+| Every | self + point with objects, else nothing | interval, starting at |
 | After | self + point with objects, else nothing | time |
 | Bounce | self, other (wall), point | which wall |
 | Touch | self, other (ball), point | with which balls |
@@ -64,8 +69,10 @@ Most actions take a target: **self**, **other** or **a whole group**.
 | Change | property (speed, size, HP, bounciness, mass, gravity, drag, spin), add/multiply/set, amount, optional limit. Target can also be *future spawns* of a group |
 | Push | forward, away from / toward the hit, to center, random, angle; strength |
 | Explode | at the event point, center or a position; radius, strength |
-| Duplicate | copies, spread |
-| Spawn | group, count, at its placement / self / event point / center |
+| Duplicate | copies; burst, split in size, or a trail over time |
+| Fall off | target leaves the plane toward the viewer and is removed |
+| Damage | target, amount (counts damage buffs and shields) |
+| Spawn | group, count (or from a counter), one every N seconds, at its placement / self / event point / center |
 | Destroy | target |
 | Attach tether | to the hit point (sticks to the wall), other ball or center; pull, damping, rest length, max length, max per ball |
 | Cut tether | the crossed one, oldest, newest or all |
@@ -77,4 +84,4 @@ Most actions take a target: **self**, **other** or **a whole group**.
 
 ## Presets
 
-All built from the blocks above, with no special code: Ring Escape, Tether Battle, Doubling Jaw, Spiral Drop, Arena, Growth, Split.
+All built from the blocks above. Each mode generates a random sim from a seed (see `games/ball-sim/src/sim/modes.ts`).

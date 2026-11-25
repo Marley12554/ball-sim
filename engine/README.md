@@ -40,10 +40,15 @@ world.step();
 | `maxSubsteps` | 32 | per body per step against walls |
 | `minImpactSpeed` | 1 | slower impacts are resolved but not reported |
 | `detectTetherTouch` | true | report bodies crossing other bodies' tethers |
+| `pairCorrection` | 1 | fraction of body-body overlap removed per step. Lower lets crowds compress so containers fill solid |
+| `restThreshold` | 0 | impacts slower than this get zero restitution, so piles settle instead of jittering |
 
 ### Bodies
 
-Circles, stored as flat typed arrays indexed by slot: `x, y, vx, vy, r, invMass, restitution, damping, gravityScale, layer, mask, group, alive, tetherCount`. Hot code reads and writes these directly. Slots `0..highWater-1`, skip where `alive[i] === 0`.
+Circles or axis-aligned squares (`shape: 'box'`, half-size `radius`, never rotates), stored as flat typed arrays indexed by slot: `x, y, vx, vy, r, invMass, restitution, damping, gravityScale, layer, mask, group, alive, tetherCount, shape, frozen, soft`.
+
+- `frozen[i] = 1` takes a body out of play: it doesn't move or collide until cleared.
+- `soft[i]` (seconds) makes a body push apart gently with no bounce, for bodies placed into a crowd. Hot code reads and writes these directly. Slots `0..highWater-1`, skip where `alive[i] === 0`.
 
 - `createBody(def): handle | -1`
 - `destroyBody(handle)`, `destroyIndex(i)`: also removes every tether on that body
@@ -63,6 +68,10 @@ Pieces are thick lines with round caps, so gap edges in a ring behave like round
 
 - `addCollider(def): id`, `removeCollider(id)` (also removes tethers anchored to it)
 - `setColliderTransform(id, x, y, angle)`, `setColliderVelocity(id, vx, vy, w)`
+- `setColliderScale(id, scale, scaleVelocity)`: scales pieces about the origin (thickness fixed). Bounces feel the moving wall
+- `setArc(piece, radius, start, span, growth)`: reshape an arc in place, e.g. a ring that shrinks while its gap keeps a fixed width
+
+Rings (colliders whose pieces are all arcs centered on the origin) skip the grid. Still rings sharing a center are kept sorted by radius and found by binary search on a body's distance, so 10,000 concentric rings cost about the same as 10.
 - `colliderToWorld(id, lx, ly, out)`
 
 Rotation costs nothing extra if the collider was created with `angularVelocity` or `rotates: true` (it's registered with a rotation-proof bound). Translation rebuilds the static grid that step. To drive motion (swing, slide), set velocities each step with `setColliderVelocity` so the world integrates to the target pose.
@@ -102,10 +111,11 @@ Body-body contacts only report on approach, so resting contact doesn't spam. Tet
 2. Rebuild the static grid if colliders moved or changed.
 3. Apply tether springs and rope limits.
 4. Integrate bodies (gravity, damping, speed clamp), substepping each body against walls so it never moves more than half its contact radius per substep. This is what stops fast balls passing through walls. Within a substep, overlapping wall pieces resolve deepest first, so polyline joints don't produce skewed corner normals.
-5. Body-body pass via the spatial hash. Each overlapping pair is handled once, in the first cell both cover.
-6. Tether touch detection.
+5. Body-body pass via the spatial hash. Each overlapping pair is handled once, in the first cell both cover. Circle-circle, box-box and box-circle.
+6. Final wall pass: walls get the last word, so crowds can't push bodies through them.
+7. Tether touch detection.
 
-Known limits: body-body has no swept test, so two tiny, very fast balls can pass through each other. Bodies are circles only for now. Non-rotating squares come with arena mode.
+Known limits: body-body has no swept test, so two tiny, very fast balls can pass through each other. Squares never rotate, and squares against arcs are treated as circles.
 
 ## Runner
 

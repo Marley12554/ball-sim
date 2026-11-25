@@ -30,6 +30,13 @@ export interface WorldConfig {
   minImpactSpeed: number;
   /** Report bodies crossing other bodies' tethers. Costs a grid rebuild per step when tethers exist. */
   detectTetherTouch: boolean;
+  /**
+   * Fraction of body-body overlap removed per step. 1 = hard. Lower values let
+   * dense crowds compress a little, so containers can fill to a near-solid mass.
+   */
+  pairCorrection: number;
+  /** Impacts slower than this bounce with zero restitution, so piles settle instead of jittering. */
+  restThreshold: number;
 }
 
 export const DEFAULT_CONFIG: WorldConfig = {
@@ -47,6 +54,8 @@ export const DEFAULT_CONFIG: WorldConfig = {
   maxSubsteps: 32,
   minImpactSpeed: 1,
   detectTetherTouch: true,
+  pairCorrection: 1,
+  restThreshold: 0,
 };
 
 export interface BodyDef {
@@ -70,6 +79,8 @@ export interface BodyDef {
   mask?: number;
   /** Free integer for the layer above (e.g. object group / team). */
   group?: number;
+  /** 'box' is an axis-aligned square with half-size `radius`. It never rotates. */
+  shape?: 'circle' | 'box';
 }
 
 export type PieceDef =
@@ -171,6 +182,12 @@ export class World {
   readonly gen: Uint32Array;
   readonly alive: Uint8Array;
   readonly tetherCount: Int32Array;
+  /** 0 circle, 1 axis-aligned box (half-size r). */
+  readonly shape: Uint8Array;
+  /** Frozen bodies don't move or collide. Used to take bodies out of play temporarily. */
+  readonly frozen: Uint8Array;
+  /** Seconds of softness left: soft bodies push apart gently and don't bounce (for bodies placed into a crowd). */
+  readonly soft: Float64Array;
   private freeList: Int32Array;
   private freeTop = 0;
   private bodyRange: Int32Array;
@@ -185,6 +202,14 @@ export class World {
   colSin: number[] = [];
   colW: number[] = [];
   colRotates: boolean[] = [];
+  /** Uniform scale of the collider's pieces (thickness stays fixed) and its rate of change per second. */
+  colScale: number[] = [];
+  colScaleVel: number[] = [];
+  /** True when every piece is an arc centered on the collider origin (rings). Found by distance, not by grid. */
+  colRadial: boolean[] = [];
+  colRingR: number[] = [];
+  /** Relative growth rate (dR/dt / R) used only for wall velocity, when pieces are resized by hand. */
+  colGrowth: number[] = [];
   colVx: number[] = [];
   colVy: number[] = [];
   colRest: number[] = [];
@@ -272,6 +297,9 @@ export class World {
     this.gen = new Uint32Array(n);
     this.alive = new Uint8Array(n);
     this.tetherCount = new Int32Array(n);
+    this.shape = new Uint8Array(n);
+    this.frozen = new Uint8Array(n);
+    this.soft = new Float64Array(n);
     this.freeList = new Int32Array(n);
     this.bodyRange = new Int32Array(n * 4);
     this.pairStamp = new Int32Array(n);
@@ -331,6 +359,9 @@ export class World {
     this.mask[i] = (d.mask ?? 0xffffffff) >>> 0;
     this.group[i] = d.group ?? 0;
     this.tetherCount[i] = 0;
+    this.shape[i] = d.shape === 'box' ? 1 : 0;
+    this.frozen[i] = 0;
+    this.soft[i] = 0;
     this.alive[i] = 1;
     this.aliveCount++;
     return handleOf(this.gen[i], i);
@@ -387,6 +418,12 @@ export class World {
     this.colSin.push(sin(angle));
     this.colW.push(d.angularVelocity ?? 0);
     this.colRotates.push(!!d.rotates || (d.angularVelocity ?? 0) !== 0);
+    this.colScale.push(1);
+    this.colScaleVel.push(0);
+    const radial = d.pieces.length > 0 && d.pieces.every((pc) => pc.kind === 'arc' && !(pc.cx ?? 0) && !(pc.cy ?? 0) && pc.radius === (d.pieces[0] as { radius: number }).radius);
+    this.colRadial.push(radial);
+    this.colRingR.push(radial ? (d.pieces[0] as { radius: number }).radius : 0);
+    this.colGrowth.push(0);
     this.colVx.push(d.vx ?? 0);
     this.colVy.push(d.vy ?? 0);
     this.colRest.push(d.restitution ?? 1);
@@ -399,6 +436,7 @@ export class World {
     for (const p of d.pieces) bound = Math.max(bound, this.pushPiece(id, p));
     this.colBound.push(bound);
     this.staticDirty = true;
+    this.radialDirty = true;
     return id;
   }
 
@@ -447,6 +485,7 @@ export class World {
       if (this.tAlive[t] && this.tKind[t] === 1 && this.tRef[t] === id) this.removeTetherIndex(t);
     }
     this.staticDirty = true;
+    this.radialDirty = true;
   }
 
   setColliderTransform(id: number, x: number, y: number, angle: number): void {
@@ -456,6 +495,36 @@ export class World {
     this.colCos[id] = cos(angle);
     this.colSin[id] = sin(angle);
     this.staticDirty = true;
+    this.radialDirty = true;
+  }
+
+  /**
+   * Reshape an arc piece in place (radius, start, span). For rings that change
+   * size while keeping their gaps a fixed width. Set `growth` (dR/dt / R) so
+   * bounces feel the moving wall.
+   */
+  setArc(p: number, radius: number, start: number, span: number, growth = 0): void {
+    const D = this.pData, b = p * PIECE_STRIDE;
+    const cx = D[b], cy = D[b + 1];
+    span = Math.min(span, 6.283185307179586);
+    const end = start + span;
+    const u0x = cos(start), u0y = sin(start), u1x = cos(end), u1y = sin(end);
+    D[b + 2] = radius; D[b + 3] = span;
+    D[b + 4] = u0x; D[b + 5] = u0y; D[b + 6] = u1x; D[b + 7] = u1y;
+    D[b + 8] = cx + u0x * radius; D[b + 9] = cy + u0y * radius;
+    D[b + 10] = cx + u1x * radius; D[b + 11] = cy + u1y * radius;
+    const col = this.pCol[p];
+    if (this.colRadial[col]) this.colRingR[col] = radius;
+    this.colGrowth[col] = growth;
+    if (!this.colRadial[col]) this.staticDirty = true;
+  }
+
+  /** Scale a collider's pieces around its origin. Thickness is unchanged. `scaleVelocity` is per second. */
+  setColliderScale(id: number, scale: number, scaleVelocity = 0): void {
+    this.colScale[id] = scale;
+    this.colScaleVel[id] = scaleVelocity;
+    this.staticDirty = true;
+    this.radialDirty = true;
   }
 
   setColliderVelocity(id: number, vx: number, vy: number, angularVelocity: number): void {
@@ -466,6 +535,7 @@ export class World {
       this.staticDirty = true;
     }
     if (vx !== 0 || vy !== 0) this.staticDirty = true;
+    if ((vx !== 0 || vy !== 0) !== (this.colVx[id] !== 0 || this.colVy[id] !== 0)) this.radialDirty = true;
     this.colW[id] = angularVelocity;
   }
 
@@ -485,20 +555,22 @@ export class World {
       const col = this.pCol[p];
       const ht = this.pHt[p];
       if (ht < minHt) minHt = ht;
+      if (this.colRadial[col]) continue;
+      const sc = this.colScale[col];
       if (this.colRotates[col]) {
         // Rotating: register the rotation-invariant bound so rotation never forces a rebuild.
-        const b = this.colBound[col];
+        const b = this.colBound[col] * Math.max(1, sc);
         g.add(p, this.colX[col] - b, this.colY[col] - b, this.colX[col] + b, this.colY[col] + b);
         continue;
       }
       const D = this.pData, base = p * PIECE_STRIDE;
       let x0: number, y0: number, x1: number, y1: number;
       if (this.pKind[p] === SEG) {
-        x0 = Math.min(D[base], D[base + 2]) - ht; x1 = Math.max(D[base], D[base + 2]) + ht;
-        y0 = Math.min(D[base + 1], D[base + 3]) - ht; y1 = Math.max(D[base + 1], D[base + 3]) + ht;
+        x0 = Math.min(D[base], D[base + 2]) * sc - ht; x1 = Math.max(D[base], D[base + 2]) * sc + ht;
+        y0 = Math.min(D[base + 1], D[base + 3]) * sc - ht; y1 = Math.max(D[base + 1], D[base + 3]) * sc + ht;
       } else {
-        const R = D[base + 2] + ht;
-        x0 = D[base] - R; x1 = D[base] + R; y0 = D[base + 1] - R; y1 = D[base + 1] + R;
+        const R = D[base + 2] * sc + ht;
+        x0 = D[base] * sc - R; x1 = D[base] * sc + R; y0 = D[base + 1] * sc - R; y1 = D[base + 1] * sc + R;
       }
       // Rotate the local AABB corners into world space.
       const c = this.colCos[col], s = this.colSin[col], ox = this.colX[col], oy = this.colY[col];
@@ -514,6 +586,41 @@ export class World {
     g.build();
     this.minHalfThickness = minHt === Infinity ? 0 : minHt;
     this.staticDirty = false;
+  }
+
+  /* Radial colliders (rings): still, unscaled rings that share a center form a
+   * stack sorted by radius, searched by distance from the center. Everything
+   * else radial (moving or scaling rings) is checked one by one. */
+  private radialDirty = true;
+  private stacks: { cx: number; cy: number; R: Float64Array; cols: Int32Array }[] = [];
+  private looseRadial: number[] = [];
+  private radialMaxHt = 0;
+  private hasRadial = false;
+
+  private rebuildRadial(): void {
+    const groups = new Map<string, { cx: number; cy: number; items: [number, number][] }>();
+    this.looseRadial = [];
+    let maxHt = 0;
+    let any = false;
+    for (let c = 0; c < this.colAlive.length; c++) {
+      if (!this.colAlive[c] || !this.colRadial[c]) continue;
+      any = true;
+      for (let p = this.colPieceStart[c]; p < this.colPieceStart[c] + this.colPieceCount[c]; p++) if (this.pHt[p] > maxHt) maxHt = this.pHt[p];
+      const still = this.colVx[c] === 0 && this.colVy[c] === 0 && this.colScale[c] === 1 && this.colScaleVel[c] === 0;
+      if (!still) { this.looseRadial.push(c); continue; }
+      const key = `${this.colX[c]},${this.colY[c]}`;
+      let gr = groups.get(key);
+      if (!gr) { gr = { cx: this.colX[c], cy: this.colY[c], items: [] }; groups.set(key, gr); }
+      gr.items.push([this.colRingR[c], c]);
+    }
+    this.stacks = [];
+    for (const gr of groups.values()) {
+      gr.items.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+      this.stacks.push({ cx: gr.cx, cy: gr.cy, R: Float64Array.from(gr.items.map((x) => x[0])), cols: Int32Array.from(gr.items.map((x) => x[1])) });
+    }
+    this.radialMaxHt = maxHt;
+    this.hasRadial = any;
+    this.radialDirty = false;
   }
 
   /* ---------------------------- Tethers --------------------------- */
@@ -604,9 +711,16 @@ export class World {
 
     this.advanceColliders(dt);
     if (this.staticDirty) this.rebuildStatic();
+    if (this.radialDirty) this.rebuildRadial();
     if (this.tetherAliveCount > 0) this.applyTethers(dt);
     this.integrate(dt);
     this.solveBodyPairs();
+    // Walls get the last word, so crowds can't push bodies through them.
+    if (this.staticGrid.entryCount > 0 || this.hasRadial) {
+      for (let i = 0; i < this.highWater; i++) {
+        if (this.alive[i] && !this.frozen[i]) this.resolveStatic(i, false);
+      }
+    }
     if (this.cfg.detectTetherTouch && this.tetherAliveCount > 0) this.detectTetherTouches();
 
     this.stepCount++;
@@ -626,7 +740,13 @@ export class World {
       if (this.colVx[id] !== 0 || this.colVy[id] !== 0) {
         this.colX[id] += this.colVx[id] * dt;
         this.colY[id] += this.colVy[id] * dt;
-        this.staticDirty = true;
+        if (!this.colRadial[id]) this.staticDirty = true;
+      }
+      const sv = this.colScaleVel[id];
+      if (sv !== 0) {
+        const ns = Math.max(0.001, this.colScale[id] + sv * dt);
+        if (!this.colRadial[id] && ns > this.colScale[id]) this.staticDirty = true;
+        this.colScale[id] = ns;
       }
     }
   }
@@ -693,9 +813,10 @@ export class World {
     let gx = this.gravityX, gy = this.gravityY;
     const radial = this.gravityMode === 'point';
     const gStrength = radial ? sqrt(gx * gx + gy * gy) : 0;
-    const hasStatic = this.staticGrid.entryCount > 0;
+    const hasStatic = this.staticGrid.entryCount > 0 || this.hasRadial;
     for (let i = 0; i < this.highWater; i++) {
-      if (!this.alive[i]) continue;
+      if (!this.alive[i] || this.frozen[i]) continue;
+      if (this.soft[i] > 0) this.soft[i] = Math.max(0, this.soft[i] - dt);
       if (radial) {
         const dx = this.gravityCx - this.x[i], dy = this.gravityCy - this.y[i];
         const d = sqrt(dx * dx + dy * dy);
@@ -731,7 +852,7 @@ export class World {
       for (let s = 0; s < n; s++) {
         this.x[i] += this.vx[i] * h;
         this.y[i] += this.vy[i] * h;
-        this.resolveStatic(i);
+        this.resolveStatic(i, true);
       }
     }
   }
@@ -749,7 +870,7 @@ export class World {
    * deeper than the shared endpoint cap of its neighbor, and resolving the face
    * first removes the cap contact, so fast balls don't get skewed normals.
    */
-  private resolveStatic(i: number): void {
+  private resolveStatic(i: number, report: boolean): void {
     const g = this.staticGrid;
     const r = this.r[i];
     const x0 = g.cellOf(this.x[i] - r), x1 = g.cellOf(this.x[i] + r);
@@ -769,6 +890,30 @@ export class World {
         }
       }
     }
+    if (this.hasRadial) {
+      const reach = (this.shape[i] === 1 ? r * 1.4143 : r) + this.radialMaxHt + 1;
+      const bx = this.x[i], by = this.y[i];
+      for (const st of this.stacks) {
+        const d = sqrt((bx - st.cx) * (bx - st.cx) + (by - st.cy) * (by - st.cy));
+        // Binary search for the first ring with R >= d - reach.
+        let lo = 0, hi = st.R.length;
+        const want = d - reach;
+        while (lo < hi) { const mid = (lo + hi) >> 1; if (st.R[mid] < want) lo = mid + 1; else hi = mid; }
+        for (let k = lo; k < st.R.length && st.R[k] <= d + reach; k++) {
+          const c = st.cols[k];
+          for (let p = this.colPieceStart[c]; p < this.colPieceStart[c] + this.colPieceCount[c]; p++) {
+            if (this.pAlive[p] && this.collidePiece(i, p, true) >= 0) { P[n] = p; Dp[n] = this.lastDepth; n++; }
+          }
+        }
+      }
+      for (const c of this.looseRadial) {
+        const d = sqrt((bx - this.colX[c]) ** 2 + (by - this.colY[c]) ** 2);
+        if (Math.abs(d - this.colRingR[c] * this.colScale[c]) > reach) continue;
+        for (let p = this.colPieceStart[c]; p < this.colPieceStart[c] + this.colPieceCount[c]; p++) {
+          if (this.pAlive[p] && this.collidePiece(i, p, true) >= 0) { P[n] = p; Dp[n] = this.lastDepth; n++; }
+        }
+      }
+    }
     if (n === 0) return;
     const rep = this.reportedCols;
     rep[0] = rep[1] = rep[2] = rep[3] = -1;
@@ -780,7 +925,7 @@ export class World {
     for (let k = 0; k < n; k++) {
       const p = P[order[k]];
       const col = this.collidePiece(i, p, false);
-      if (col >= 0) {
+      if (col >= 0 && report) {
         let seen = false;
         for (let q = 0; q < nRep; q++) if (rep[q] === col) seen = true;
         if (!seen) {
@@ -802,67 +947,97 @@ export class World {
     if (!(this.layer[i] & this.colMask[col]) || !(this.colLayer[col] & this.mask[i])) return -1;
     const c = this.colCos[col], s = this.colSin[col];
     const ox = this.colX[col], oy = this.colY[col];
+    const sc = this.colScale[col];
     const dx = this.x[i] - ox, dy = this.y[i] - oy;
     const lx = c * dx + s * dy, ly = -s * dx + c * dy;
     const D = this.pData, b = p * PIECE_STRIDE;
-    let qx: number, qy: number, fnx: number, fny: number;
+    const ht = this.pHt[p];
+    let nlx: number, nly: number, pen: number;
 
-    if (this.pKind[p] === SEG) {
-      const ax = D[b], ay = D[b + 1], ex = D[b + 2] - ax, ey = D[b + 3] - ay;
-      const L2 = D[b + 6];
-      let t = L2 > 0 ? ((lx - ax) * ex + (ly - ay) * ey) / L2 : 0;
-      if (t < 0) t = 0; else if (t > 1) t = 1;
-      qx = ax + ex * t; qy = ay + ey * t;
-      fnx = D[b + 4]; fny = D[b + 5];
+    if (this.shape[i] === 1 && this.pKind[p] === SEG) {
+      // Box vs thick segment, separating axis test on the segment normal and the box axes.
+      const h = this.r[i];
+      const ax = D[b] * sc, ay = D[b + 1] * sc, bx = D[b + 2] * sc, by = D[b + 3] * sc;
+      const snx = D[b + 4], sny = D[b + 5];
+      let best = Infinity, bnx = 0, bny = 0;
+      for (let k = 0; k < 3; k++) {
+        // Box axes expressed in the collider's local frame.
+        const nx = k === 0 ? snx : k === 1 ? c : s;
+        const ny = k === 0 ? sny : k === 1 ? -s : c;
+        const boxC = lx * nx + ly * ny;
+        const boxR = h * (Math.abs(nx * c - ny * s) + Math.abs(nx * s + ny * c));
+        const pa = ax * nx + ay * ny, pb = bx * nx + by * ny;
+        const extra = ht * Math.abs(nx * snx + ny * sny);
+        const smin = Math.min(pa, pb) - extra, smax = Math.max(pa, pb) + extra;
+        const overlap = Math.min(boxC + boxR, smax) - Math.max(boxC - boxR, smin);
+        if (overlap <= 0) return -1;
+        if (overlap < best) {
+          best = overlap;
+          const sign = boxC >= (smin + smax) / 2 ? 1 : -1;
+          bnx = nx * sign; bny = ny * sign;
+        }
+      }
+      if (measure) { this.lastDepth = best; return 1; }
+      nlx = bnx; nly = bny; pen = best;
     } else {
-      const acx = D[b], acy = D[b + 1], R = D[b + 2], span = D[b + 3];
-      const vx = lx - acx, vy = ly - acy;
-      const len = sqrt(vx * vx + vy * vy);
-      // Fast reject: outside the annulus band.
-      const reach = this.r[i] + this.pHt[p];
-      if (len - R > reach || R - len > reach) return -1;
-      let inside: boolean;
-      if (span >= 6.283185307179586) inside = true;
-      else {
-        const u0x = D[b + 4], u0y = D[b + 5], u1x = D[b + 6], u1y = D[b + 7];
-        const c0 = u0x * vy - u0y * vx; // cross(u0, v)
-        const c1 = vx * u1y - vy * u1x; // cross(v, u1)
-        inside = span <= 3.141592653589793 ? c0 >= 0 && c1 >= 0 : !(c0 < 0 && c1 < 0);
-      }
-      if (inside && len > 0) {
-        qx = acx + (vx / len) * R; qy = acy + (vy / len) * R;
-        fnx = vx / len; fny = vy / len;
+      let qx: number, qy: number, fnx: number, fny: number;
+      if (this.pKind[p] === SEG) {
+        const ax = D[b] * sc, ay = D[b + 1] * sc, ex = (D[b + 2] - D[b]) * sc, ey = (D[b + 3] - D[b + 1]) * sc;
+        const L2 = D[b + 6] * sc * sc;
+        let t = L2 > 0 ? ((lx - ax) * ex + (ly - ay) * ey) / L2 : 0;
+        if (t < 0) t = 0; else if (t > 1) t = 1;
+        qx = ax + ex * t; qy = ay + ey * t;
+        fnx = D[b + 4]; fny = D[b + 5];
       } else {
-        const e0x = D[b + 8], e0y = D[b + 9], e1x = D[b + 10], e1y = D[b + 11];
-        const d0 = (lx - e0x) * (lx - e0x) + (ly - e0y) * (ly - e0y);
-        const d1 = (lx - e1x) * (lx - e1x) + (ly - e1y) * (ly - e1y);
-        if (d0 <= d1) { qx = e0x; qy = e0y; } else { qx = e1x; qy = e1y; }
-        fnx = 1; fny = 0;
+        const acx = D[b] * sc, acy = D[b + 1] * sc, R = D[b + 2] * sc, span = D[b + 3];
+        const vx = lx - acx, vy = ly - acy;
+        const len = sqrt(vx * vx + vy * vy);
+        const reach = this.r[i] + ht;
+        if (len - R > reach || R - len > reach) return -1;
+        let inside: boolean;
+        if (span >= 6.283185307179586) inside = true;
+        else {
+          const u0x = D[b + 4], u0y = D[b + 5], u1x = D[b + 6], u1y = D[b + 7];
+          const c0 = u0x * vy - u0y * vx;
+          const c1 = vx * u1y - vy * u1x;
+          inside = span <= 3.141592653589793 ? c0 >= 0 && c1 >= 0 : !(c0 < 0 && c1 < 0);
+        }
+        if (inside && len > 0) {
+          qx = acx + (vx / len) * R; qy = acy + (vy / len) * R;
+          fnx = vx / len; fny = vy / len;
+        } else {
+          const e0x = D[b + 8] * sc, e0y = D[b + 9] * sc, e1x = D[b + 10] * sc, e1y = D[b + 11] * sc;
+          const d0 = (lx - e0x) * (lx - e0x) + (ly - e0y) * (ly - e0y);
+          const d1 = (lx - e1x) * (lx - e1x) + (ly - e1y) * (ly - e1y);
+          if (d0 <= d1) { qx = e0x; qy = e0y; } else { qx = e1x; qy = e1y; }
+          fnx = 1; fny = 0;
+        }
       }
+      const ex = lx - qx, ey = ly - qy;
+      const R = this.r[i] + ht;
+      const d2 = ex * ex + ey * ey;
+      if (d2 >= R * R) return -1;
+      const d = sqrt(d2);
+      if (measure) { this.lastDepth = R - d; return 1; }
+      if (d > 1e-12) { nlx = ex / d; nly = ey / d; } else { nlx = fnx; nly = fny; }
+      pen = R - d;
     }
 
-    const ex = lx - qx, ey = ly - qy;
-    const R = this.r[i] + this.pHt[p];
-    const d2 = ex * ex + ey * ey;
-    if (d2 >= R * R) return -1;
-    const d = sqrt(d2);
-    if (measure) { this.lastDepth = R - d; return 1; }
-    let nlx: number, nly: number;
-    if (d > 1e-12) { nlx = ex / d; nly = ey / d; } else { nlx = fnx; nly = fny; }
-    const pen = R - d;
     const nx = c * nlx - s * nly, ny = s * nlx + c * nly;
     this.x[i] += nx * pen;
     this.y[i] += ny * pen;
 
-    // Contact point in world space and wall velocity there.
+    // Contact point in world space and wall velocity there (spin, slide and scaling).
     const px = this.x[i] - nx * this.r[i], py = this.y[i] - ny * this.r[i];
     const w = this.colW[col];
-    const wvx = this.colVx[col] - w * (py - oy);
-    const wvy = this.colVy[col] + w * (px - ox);
+    const sv = (sc > 0 ? this.colScaleVel[col] / sc : 0) + this.colGrowth[col];
+    const wvx = this.colVx[col] - w * (py - oy) + sv * (px - ox);
+    const wvy = this.colVy[col] + w * (px - ox) + sv * (py - oy);
     const rvx = this.vx[i] - wvx, rvy = this.vy[i] - wvy;
     const vn = rvx * nx + rvy * ny;
     if (vn >= 0) return -1;
-    const e = this.restitution[i] * this.colRest[col];
+    let e = this.restitution[i] * this.colRest[col];
+    if (-vn < this.cfg.restThreshold || this.soft[i] > 0) e = 0;
     const j = -(1 + e) * vn;
     this.vx[i] += nx * j;
     this.vy[i] += ny * j;
@@ -876,7 +1051,7 @@ export class World {
     const g = this.bodyGrid;
     g.begin();
     for (let i = 0; i < this.highWater; i++) {
-      if (!this.alive[i]) continue;
+      if (!this.alive[i] || this.frozen[i]) continue;
       const r = this.r[i];
       g.add(i, this.x[i] - r, this.y[i] - r, this.x[i] + r, this.y[i] + r);
     }
@@ -886,14 +1061,16 @@ export class World {
       let k = 0;
       const tmp = [0, 0, 0, 0];
       for (let i = 0; i < this.highWater; i++) {
-        if (!this.alive[i]) continue;
+        if (!this.alive[i] || this.frozen[i]) continue;
         g.rangeOf(k++, tmp);
         BR[i * 4] = tmp[0]; BR[i * 4 + 1] = tmp[1]; BR[i * 4 + 2] = tmp[2]; BR[i * 4 + 3] = tmp[3];
       }
     }
     const minImpact = this.cfg.minImpactSpeed;
+    const corr = this.cfg.pairCorrection;
+    const restT = this.cfg.restThreshold;
     for (let i = 0; i < this.highWater; i++) {
-      if (!this.alive[i]) continue;
+      if (!this.alive[i] || this.frozen[i]) continue;
       const ix0 = BR[i * 4], iy0 = BR[i * 4 + 1], ix1 = BR[i * 4 + 2], iy1 = BR[i * 4 + 3];
       for (let cy = iy0; cy <= iy1; cy++) {
         for (let cx = ix0; cx <= ix1; cx++) {
@@ -908,20 +1085,55 @@ export class World {
             if (ccx !== cx || ccy !== cy) continue;
             if (!(this.layer[i] & this.mask[j]) || !(this.layer[j] & this.mask[i])) continue;
             const dx = this.x[j] - this.x[i], dy = this.y[j] - this.y[i];
-            const R = this.r[i] + this.r[j];
-            const d2 = dx * dx + dy * dy;
-            if (d2 >= R * R) continue;
+            let nx = 1, ny = 0, pen: number;
+            const si = this.shape[i], sj = this.shape[j];
+            if (si === 0 && sj === 0) {
+              const R = this.r[i] + this.r[j];
+              const d2 = dx * dx + dy * dy;
+              if (d2 >= R * R) continue;
+              const d = sqrt(d2);
+              if (d > 1e-12) { nx = dx / d; ny = dy / d; }
+              pen = R - d;
+            } else if (si === 1 && sj === 1) {
+              const ovx = this.r[i] + this.r[j] - Math.abs(dx);
+              const ovy = this.r[i] + this.r[j] - Math.abs(dy);
+              if (ovx <= 0 || ovy <= 0) continue;
+              if (ovx < ovy) { nx = dx >= 0 ? 1 : -1; ny = 0; pen = ovx; }
+              else { nx = 0; ny = dy >= 0 ? 1 : -1; pen = ovy; }
+            } else {
+              // Box vs circle. Work from the box's point of view, then flip if i is the circle.
+              const bi = si === 1 ? i : j, ci = si === 1 ? j : i;
+              const h = this.r[bi], rc = this.r[ci];
+              const rx = this.x[ci] - this.x[bi], ry = this.y[ci] - this.y[bi];
+              const qx = rx < -h ? -h : rx > h ? h : rx;
+              const qy = ry < -h ? -h : ry > h ? h : ry;
+              let mx: number, my: number;
+              if (qx === rx && qy === ry) {
+                // Circle center inside the box: push out along the shallower axis.
+                const ox = h - Math.abs(rx), oy = h - Math.abs(ry);
+                if (ox < oy) { mx = rx >= 0 ? 1 : -1; my = 0; pen = ox + rc; }
+                else { mx = 0; my = ry >= 0 ? 1 : -1; pen = oy + rc; }
+              } else {
+                const ex = rx - qx, ey = ry - qy;
+                const d2 = ex * ex + ey * ey;
+                if (d2 >= rc * rc) continue;
+                const d = sqrt(d2);
+                mx = ex / d; my = ey / d;
+                pen = rc - d;
+              }
+              if (bi === i) { nx = mx; ny = my; } else { nx = -mx; ny = -my; }
+            }
             const wi = this.invMass[i], wj = this.invMass[j], ws = wi + wj;
             if (ws === 0) continue;
-            const d = sqrt(d2);
-            let nx = 1, ny = 0;
-            if (d > 1e-12) { nx = dx / d; ny = dy / d; }
-            const pen = R - d;
-            this.x[i] -= nx * pen * (wi / ws); this.y[i] -= ny * pen * (wi / ws);
-            this.x[j] += nx * pen * (wj / ws); this.y[j] += ny * pen * (wj / ws);
+            const isSoft = this.soft[i] > 0 || this.soft[j] > 0;
+            const k = isSoft ? corr * 0.2 : corr;
+            const pk = pen * k;
+            this.x[i] -= nx * pk * (wi / ws); this.y[i] -= ny * pk * (wi / ws);
+            this.x[j] += nx * pk * (wj / ws); this.y[j] += ny * pk * (wj / ws);
             const vn = (this.vx[j] - this.vx[i]) * nx + (this.vy[j] - this.vy[i]) * ny;
             if (vn >= 0) continue;
-            const imp = (-(1 + this.restitution[i] * this.restitution[j]) * vn) / ws;
+            const rest = isSoft || -vn < restT ? 0 : this.restitution[i] * this.restitution[j];
+            const imp = (-(1 + rest) * vn) / ws;
             this.vx[i] -= nx * imp * wi; this.vy[i] -= ny * imp * wi;
             this.vx[j] += nx * imp * wj; this.vy[j] += ny * imp * wj;
             if (-vn >= minImpact) {

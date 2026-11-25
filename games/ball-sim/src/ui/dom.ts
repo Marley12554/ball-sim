@@ -46,6 +46,9 @@ const ICONS: Record<string, string> = {
   download: '<path d="M12 4v11M7 11l5 5 5-5"/><path d="M5 19h14"/>',
   speed: '<path d="M5 17a8 8 0 1 1 14 0"/><path d="M12 13l4-4"/>',
   copy: '<rect x="8" y="8" width="11" height="11" rx="2"/><path d="M5 15V6a1 1 0 0 1 1-1h9"/>',
+  sound: '<path d="M5 9.5h3l4-3.5v12l-4-3.5H5z"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/>',
+  mute: '<path d="M5 9.5h3l4-3.5v12l-4-3.5H5z"/><path d="M16 9.5l5 5M21 9.5l-5 5"/>',
+  chevron: '<path d="M7 14l5-5 5 5"/>',
   sliders: '<path d="M5 7h9M18 7h1M5 17h3M12 17h7"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/>',
 };
 

@@ -2,6 +2,7 @@ import { Runner } from '@engine/index';
 import { Sim } from '../sim/sim';
 import type { SimDef } from '../sim/types';
 import { Renderer } from '../render/renderer';
+import { audio } from './audio';
 
 /* One animation loop for everything on screen. */
 type Tick = (dt: number) => void;
@@ -28,6 +29,10 @@ export interface PlayerOptions {
   budgetMs?: number;
   dprCap?: number;
   hudTop?: number;
+  /** Play sound effects for this sim. */
+  sound?: boolean;
+  /** Cheaper drawing for small previews. */
+  lite?: boolean;
 }
 
 /** A sim running in a canvas: sim + fixed-step runner + renderer. */
@@ -58,6 +63,7 @@ export class Player {
       this.sim = new Sim({ ...def, graph: { nodes: [], wires: [] } });
     }
     const sim = this.sim;
+    sim.fxOn = true;
     if (this.onFire) {
       const f = this.onFire;
       const orig = sim.dispatcher.fire.bind(sim.dispatcher);
@@ -88,15 +94,28 @@ export class Player {
     this.runner.paused = p;
   }
 
+  /** Called when a looping preview finishes; return a new def to play next (or nothing to replay). */
+  nextDef: (() => SimDef | null) | null = null;
+
   frame(dt: number): void {
     this.runner.frame(dt);
-    if (this.opts.loop && this.sim.outcome && this.sim.sinceEnd > this.def.settings.endHold) this.restart();
-    this.draw();
+    const fx = this.sim.fx;
+    if (fx.length) {
+      this.sim.fx = [];
+      this.renderer.ingest(this.sim, fx);
+      if (this.opts.sound) audio.play(fx, this.renderer.viewRadius);
+    }
+    if (this.opts.loop && this.sim.outcome && this.sim.sinceEnd > this.def.settings.endHold) {
+      const next = this.nextDef?.();
+      if (next) this.load(next);
+      else this.restart();
+    }
+    this.draw(dt);
   }
 
-  draw(): void {
+  draw(dt = 1 / 60): void {
     this.renderer.resize(this.opts.dprCap ?? 2);
-    this.renderer.draw(this.sim, { hud: this.opts.hud, hudTop: this.opts.hudTop });
+    this.renderer.draw(this.sim, { hud: this.opts.hud, hudTop: this.opts.hudTop, lite: this.opts.lite }, dt);
   }
 }
 

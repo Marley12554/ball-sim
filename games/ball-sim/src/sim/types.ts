@@ -5,7 +5,9 @@ export type Look =
   | { t: 'gradient'; c: string[]; kind: 'linear' | 'radial'; angle: number }
   | { t: 'pattern'; p: PatternKind; c: [string, string]; scale: number; angle: number }
   | { t: 'flag'; code: string }
-  | { t: 'image'; asset: string };
+  | { t: 'image'; asset: string }
+  /** The boss: a grinning imp face, drawn in code. */
+  | { t: 'imp' };
 
 export type PatternKind = 'stripes' | 'dots' | 'checker' | 'split' | 'rings' | 'quarters';
 
@@ -29,6 +31,14 @@ export interface SimSettings {
   speedLimit: number;
   /** Seconds after the outcome before a looping preview restarts. */
   endHold: number;
+  /** Seconds everything holds still in its starting pose before the sim begins. */
+  startDelay: number;
+  /** 'fit' frames everything. 'follow' trails the first ball with a lazy camera. */
+  camera: 'fit' | 'follow';
+  /** Fraction of ball overlap pushed apart per step (1 = hard, lower lets crowds compress). */
+  pairCorrection: number;
+  /** Impacts slower than this don't bounce, so piles settle. */
+  restThreshold: number;
 }
 
 export interface SimDef {
@@ -51,7 +61,28 @@ export const DEFAULT_SETTINGS: SimSettings = {
   maxObjects: 5000,
   speedLimit: 3000,
   endHold: 4,
+  startDelay: 1.5,
+  camera: 'fit',
+  pairCorrection: 1,
+  restThreshold: 30,
 };
+
+/** Things that happened this step, for the renderer and audio. Not part of the simulation state. */
+export type Fx =
+  | { k: 'bounce'; x: number; y: number; s: number; r: number; l: number }
+  | { k: 'hit'; x: number; y: number; s: number; r: number; l: number }
+  | { k: 'shatter'; x: number; y: number; color: string; arcs: number[]; segs: number[]; n: number }
+  | { k: 'boom'; x: number; y: number; big: boolean }
+  | { k: 'burst'; x: number; y: number; r: number; color: string }
+  | { k: 'clank'; x: number; y: number; s: number }
+  | { k: 'pop'; x: number; y: number; l: number }
+  | { k: 'fall'; x: number; y: number }
+  | { k: 'pickup'; x: number; y: number; kind: string }
+  | { k: 'damage'; x: number; y: number; amount: number; blocked: boolean }
+  | { k: 'zap'; x: number; y: number; x2: number; y2: number }
+  | { k: 'clash'; x: number; y: number }
+  | { k: 'swallow'; x: number; y: number; n: number }
+  | { k: 'end'; label: string };
 
 /** Event passed through trigger chains. Entity refs: body handle >= 0, collider -(id+2), zone -(ZONE_BASE+i+2). */
 export interface SimEvent {

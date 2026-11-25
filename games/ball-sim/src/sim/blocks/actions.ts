@@ -7,7 +7,7 @@ import { LookPicker } from '../looks';
 import type { ActionBlock } from './types';
 
 const D2R = dmath.PI / 180;
-const ANY_KIND = ['ball', 'ring', 'wall', 'track', 'zone'];
+const ANY_KIND = ['ball', 'ring', 'wall', 'track', 'zone', 'sledge'];
 
 function targetParams(opts: { defaults?: boolean; kinds?: string[] } = {}): ParamSpec[] {
   return [
@@ -172,6 +172,7 @@ export const explode: ActionBlock = {
       key: 'at', label: 'At', type: 'enum', default: 'point',
       options: [
         { value: 'point', label: 'Event point', needs: CTX_POINT },
+        { value: 'self', label: 'Self', needs: CTX_SELF | CTX_POINT },
         { value: 'center', label: 'Center' },
         { value: 'fixed', label: 'Position' },
       ],
@@ -185,12 +186,17 @@ export const explode: ActionBlock = {
   run(sim, n, e) {
     const p = n.params;
     const w = sim.world;
-    const cx = p.at === 'point' ? e.px : p.at === 'fixed' ? Number(p.x) : 0;
-    const cy = p.at === 'point' ? e.py : p.at === 'fixed' ? Number(p.y) : 0;
+    let cx = p.at === 'point' ? e.px : p.at === 'fixed' ? Number(p.x) : 0;
+    let cy = p.at === 'point' ? e.py : p.at === 'fixed' ? Number(p.y) : 0;
+    if (p.at === 'self') {
+      const si = sim.bodyIdx(e.self);
+      cx = si >= 0 ? w.x[si] : e.px; cy = si >= 0 ? w.y[si] : e.py;
+    }
     const R = Number(p.radius), s = Number(p.strength);
     sim.flash.push({ x: cx, y: cy, r: R, t: sim.time });
+    sim.emit({ k: 'boom', x: cx, y: cy, big: R > 300 });
     for (let i = 0; i < w.highWater; i++) {
-      if (!w.alive[i] || sim.pendingDead[i] || w.invMass[i] === 0) continue;
+      if (!sim.inPlay(i) || w.frozen[i] || w.invMass[i] === 0) continue;
       const dx = w.x[i] - cx, dy = w.y[i] - cy;
       const d = dmath.sqrt(dx * dx + dy * dy);
       if (d >= R) continue;
@@ -206,9 +212,14 @@ export const duplicate: ActionBlock = {
   params: [
     ...targetParams({ kinds: ['ball'] }),
     { key: 'count', label: 'Copies', type: 'int', default: 1, min: 1, max: 20, step: 1 },
-    { key: 'spread', label: 'Spread', type: 'angle', default: 60, min: 0, max: 360, step: 1, unit: '°' },
+    {
+      key: 'mode', label: 'How', type: 'enum', default: 'burst',
+      options: [{ value: 'burst', label: 'Burst' }, { value: 'split', label: 'Split in size' }, { value: 'trail', label: 'Trail' }],
+    },
+    { key: 'spread', label: 'Spread', type: 'angle', default: 60, min: 0, max: 360, step: 1, unit: '°', showIf: (p) => p.mode !== 'trail' },
+    { key: 'interval', label: 'Trail gap', type: 'number', default: 0.12, min: 0.01, max: 5, step: 0.01, unit: 's', showIf: (p) => p.mode === 'trail' },
   ],
-  summary: (p, name) => `${targetText(p, name)} × ${Number(p.count) + 1}`,
+  summary: (p, name) => `${targetText(p, name)} ${p.mode === 'split' ? 'splits' : '×'} ${Number(p.count) + 1}${p.mode === 'trail' ? ' trail' : ''}`,
   run(sim, n, e) {
     const p = n.params;
     const w = sim.world;
@@ -217,14 +228,30 @@ export const duplicate: ActionBlock = {
     for (const ref of targets(sim, p, e)) {
       const i = sim.bodyIdx(ref);
       if (i < 0) continue;
+      if (p.mode === 'trail') {
+        // Copies emerge one after another from where it happened, at the same speed.
+        const x = e.px || w.x[i], y = e.py || w.y[i];
+        for (let k = 0; k < copies; k++) {
+          sim.scheduleSpawn(sim.time + (k + 1) * Number(p.interval), { group: w.group[i], x, y, vx: w.vx[i], vy: w.vy[i], from: i });
+        }
+        continue;
+      }
+      let rNew = 0;
+      if (p.mode === 'split') {
+        rNew = Math.max(1, w.r[i] / dmath.sqrt(copies + 1));
+        if (w.invMass[i] > 0) w.invMass[i] *= (w.r[i] * w.r[i]) / (rNew * rNew);
+        w.r[i] = rNew;
+      }
       for (let k = 0; k < copies; k++) {
         const a = sim.rng.range(-spread / 2, spread / 2);
         const c = dmath.cos(a), s = dmath.sin(a);
         const vx = w.vx[i] * c - w.vy[i] * s, vy = w.vx[i] * s + w.vy[i] * c;
         const sp = dmath.sqrt(vx * vx + vy * vy);
-        const ox = sp > 1e-9 ? (vx / sp) * w.r[i] * 0.5 : sim.rng.range(-1, 1);
-        const oy = sp > 1e-9 ? (vy / sp) * w.r[i] * 0.5 : sim.rng.range(-1, 1);
-        sim.queueSpawn({ group: w.group[i], x: w.x[i] + ox, y: w.y[i] + oy, vx, vy, from: i });
+        const r0 = rNew || w.r[i];
+        let ox: number, oy: number;
+        if (sp > 1e-6) { ox = (vx / sp) * r0 * 0.6; oy = (vy / sp) * r0 * 0.6; }
+        else { const b = sim.rng.range(0, dmath.TAU); ox = dmath.cos(b) * r0 * 0.6; oy = dmath.sin(b) * r0 * 0.6; }
+        sim.queueSpawn({ group: w.group[i], x: w.x[i] + ox, y: w.y[i] + oy, vx, vy, from: i, r: rNew });
       }
     }
   },
@@ -234,7 +261,9 @@ export const spawn: ActionBlock = {
   type: 'spawn', category: 'action', label: 'Spawn',
   params: [
     { key: 'group', label: 'Spawn', type: 'ref', refKinds: ['ball'], default: '' },
-    { key: 'count', label: 'Count', type: 'int', default: 1, min: 1, max: 200, step: 1 },
+    { key: 'count', label: 'Count', type: 'int', default: 1, min: 1, max: 200, step: 1, showIf: (p) => !p.countFrom },
+    { key: 'countFrom', label: 'Count from', type: 'ref', refKinds: ['counter'], anyLabel: 'Fixed number', default: '' },
+    { key: 'stagger', label: 'One every', type: 'number', default: 0, min: 0, max: 10, step: 0.05, unit: 's' },
     {
       key: 'at', label: 'At', type: 'enum', default: 'home',
       options: [
@@ -251,7 +280,9 @@ export const spawn: ActionBlock = {
     const g = sim.groupOf(p.group);
     if (!g || g.kind !== 'ball') return;
     const P = { x: 0, y: 0 }, V = { x: 0, y: 0 };
-    const count = Math.max(1, Math.min(200, p.count | 0));
+    const cnt = p.countFrom ? sim.counter(p.countFrom) : undefined;
+    const count = Math.max(1, Math.min(200, cnt ? Math.floor(sim.counterValue(cnt)) : p.count | 0));
+    const stagger = Number(p.stagger) || 0;
     for (let k = 0; k < count; k++) {
       if (p.at === 'home') sim.spawnPoint(g, k, count, P);
       else if (p.at === 'center') { P.x = 0; P.y = 0; }
@@ -260,7 +291,37 @@ export const spawn: ActionBlock = {
         if (i >= 0) { P.x = sim.world.x[i]; P.y = sim.world.y[i]; } else { P.x = e.px; P.y = e.py; }
       } else { P.x = e.px; P.y = e.py; }
       sim.spawnVelocity(g, P.x, P.y, V);
-      sim.queueSpawn({ group: g.index, x: P.x, y: P.y, vx: V.x, vy: V.y, from: -1 });
+      const req = { group: g.index, x: P.x, y: P.y, vx: V.x, vy: V.y, from: -1 };
+      if (stagger > 0 && k > 0) sim.scheduleSpawn(sim.time + k * stagger, req);
+      else sim.queueSpawn(req);
+    }
+  },
+};
+
+export const fallOff: ActionBlock = {
+  type: 'fallOff', category: 'action', label: 'Fall off',
+  params: targetParams({ kinds: ['ball'] }),
+  summary: (p, name) => targetText(p, name),
+  run(sim, n, e) {
+    for (const ref of targets(sim, n.params, e)) {
+      const i = sim.bodyIdx(ref);
+      if (i >= 0) sim.dropOut(i);
+    }
+  },
+};
+
+export const damage: ActionBlock = {
+  type: 'damage', category: 'action', label: 'Damage',
+  params: [
+    ...targetParams({ kinds: ['ball'] }),
+    { key: 'amount', label: 'Amount', type: 'number', default: 1, min: 0, max: 100000, step: 0.5 },
+  ],
+  summary: (p, name) => `${targetText(p, name)} −${p.amount}`,
+  run(sim, n, e) {
+    const attacker = n.params.target === 'other' ? sim.bodyIdx(e.self) : n.params.target === 'self' ? sim.bodyIdx(e.other) : -1;
+    for (const ref of targets(sim, n.params, e)) {
+      const i = sim.bodyIdx(ref);
+      if (i >= 0) sim.arena.damage(i, Number(n.params.amount), attacker);
     }
   },
 };
@@ -436,12 +497,16 @@ export const end: ActionBlock = {
   run(sim, n, e) {
     const label = String(n.params.label ?? '')
       .replace(/\{self\}/g, e.self !== NONE ? sim.nameOf(e.self) : 'Nobody')
-      .replace(/\{time\}/g, `${sim.time.toFixed(1)}s`);
+      .replace(/\{time\}/g, `${sim.time.toFixed(1)}s`)
+      .replace(/\{(\w+)\}/g, (m, key: string) => {
+        for (const c of sim.counters.values()) if (c.name.toLowerCase() === key.toLowerCase()) return String(sim.counterValue(c));
+        return m;
+      });
     sim.end(label);
   },
 };
 
 export const ACTION_BLOCKS: ActionBlock[] = [
-  setProp, push, explode, duplicate, spawn, destroy, attachTether, cutTether,
+  setProp, push, explode, duplicate, spawn, destroy, fallOff, damage, attachTether, cutTether,
   setGroup, setLook, counterAction, gravity, end,
 ];

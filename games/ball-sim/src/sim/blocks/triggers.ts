@@ -40,18 +40,23 @@ export const start: TriggerBlock = {
 
 export const every: TriggerBlock = {
   type: 'every', category: 'trigger', label: 'Every', objectInput: 'optional',
-  params: [{ key: 'interval', label: 'Interval', type: 'number', default: 1, min: 0.05, max: 3600, step: 0.05, unit: 's' }],
+  params: [
+    { key: 'interval', label: 'Interval', type: 'number', default: 1, min: 0.05, max: 3600, step: 0.05, unit: 's' },
+    { key: 'from', label: 'Starting at', type: 'number', default: 0, min: 0, max: 36000, step: 1, unit: 's' },
+  ],
   provides: (_p, has) => (has ? CTX_SELF | CTX_POINT : 0),
-  summary: (p) => `${p.interval}s`,
+  summary: (p) => `${p.interval}s` + (Number(p.from) > 0 ? ` from ${p.from}s` : ''),
   setup(sim, t) {
     const iv = Number(t.params.interval) || 1;
+    const from = Number(t.params.from) || 0;
     if (t.objects.length === 0) {
-      sim.hooks.step.push(() => { if (crossed(sim.time - sim.dt, sim.time, iv)) sim.fire(t, NONE); });
+      sim.hooks.step.push(() => { if (sim.time >= from && crossed(sim.time - sim.dt - from, sim.time - from, iv)) sim.fire(t, NONE); });
       return;
     }
     const mask = sim.groupMask(t.objects);
     const w = sim.world;
     sim.hooks.step.push(() => {
+      if (sim.time < from) return;
       eachBody(sim, mask, (i) => {
         const age = sim.time - sim.born[i];
         if (age > 0 && crossed(age - sim.dt, age, iv)) sim.fire(t, w.handleAt(i), NONE, w.x[i], w.y[i]);
@@ -88,7 +93,7 @@ export const after: TriggerBlock = {
 
 export const bounce: TriggerBlock = {
   type: 'bounce', category: 'trigger', label: 'Bounce', objectInput: 'required',
-  params: [{ key: 'wall', label: 'Off', type: 'ref', refKinds: ['ring', 'wall', 'track'], anyLabel: 'Any wall', default: '' }],
+  params: [{ key: 'wall', label: 'Off', type: 'ref', refKinds: ['ring', 'wall', 'track', 'sledge'], anyLabel: 'Any wall', default: '' }],
   provides: () => SOP,
   summary: (p, name) => (p.wall ? `off ${name(p.wall)}` : 'off any wall'),
   setup(sim, t) {
@@ -178,12 +183,23 @@ function containment(enter: boolean): TriggerBlock {
         for (const ref of containers) {
           const st = stateFor(ref);
           let cx: number, cy: number, inR = 0, outR = 0, zoneBox: { w: number; h: number } | null = null;
+          const zoneBoxSkip = false;
           if (isCollider(ref)) {
             const c = colliderOf(ref);
             cx = w.colX[c]; cy = w.colY[c];
-            const R = sim.colRadius[c];
+            const R = w.colRadial[c] ? w.colRingR[c] : sim.colRadius[c];
             const ht = w.pHt[w.colPieceStart[c]] ?? 0;
             inR = R - ht; outR = R + ht;
+            // Cheap skip: far from this ring's band and already classified.
+            if (st.length && !zoneBoxSkip) {
+              let near = false;
+              eachBody(sim, mask, (i) => {
+                if (near) return;
+                const d = dmath.sqrt((w.x[i] - cx) ** 2 + (w.y[i] - cy) ** 2);
+                if (st[i] === 0 || Math.abs(d - R) < ht + w.r[i] * 3 + 40) near = true;
+              });
+              if (!near) continue;
+            }
           } else {
             const z = sim.zones[zoneOf(ref)];
             cx = z.x; cy = z.y;
@@ -197,9 +213,10 @@ function containment(enter: boolean): TriggerBlock {
               outside = !inside;
             } else {
               const d = dmath.sqrt(dx * dx + dy * dy);
+              // A ball has left a ring once its center is past the ring line through the gap.
               const r = isZone(ref) ? 0 : w.r[i];
-              inside = d < inR - r;
-              outside = d > outR + r;
+              inside = d < inR - r * 0.5;
+              outside = d > outR;
               if (isZone(ref)) { inside = d < inR; outside = !inside; }
             }
             const prev = st[i];
@@ -236,6 +253,7 @@ export const valueReaches: TriggerBlock = {
     sim.hooks.freed.push((i) => { st[i] = 0; });
     const { prop, cmp } = t.params;
     const x = Number(t.params.value);
+    if (prop === 'stall') sim.needProgress = true;
     sim.hooks.step.push(() => {
       eachBody(sim, mask, (i) => {
         const h = w.handleAt(i);
@@ -329,7 +347,51 @@ export const destroyed: TriggerBlock = {
   },
 };
 
-export const TRIGGER_BLOCKS: TriggerBlock[] = [
+export const fill: TriggerBlock = {
+  type: 'fill', category: 'trigger', label: 'Fills up', objectInput: 'none',
+  params: [
+    { key: 'container', label: 'Container', type: 'ref', refKinds: ['ring', 'zone'], default: '' },
+    { key: 'percent', label: 'Full at', type: 'number', default: 75, min: 1, max: 100, step: 1, unit: '%' },
+    { key: 'hold', label: 'For', type: 'number', default: 3, min: 0, max: 120, step: 0.1, unit: 's' },
+  ],
+  provides: () => CTX_POINT,
+  summary: (p, name) => `${p.container ? name(p.container) : '?'} ${p.percent}% for ${p.hold}s`,
+  setup(sim, t) {
+    const g = refGroup(sim, t.params.container);
+    const thr = Number(t.params.percent) / 100;
+    const hold = Number(t.params.hold);
+    let since = -1;
+    let fired = false;
+    let k = 0;
+    sim.hooks.step.push(() => {
+      if (fired || g < 0) return;
+      if ((k++ & 7) !== 0) return; // check 15 times a second
+      const full = sim.fillRatio(g) >= thr;
+      if (!full) { since = -1; return; }
+      if (since < 0) since = sim.time;
+      if (sim.time - since >= hold) {
+        fired = true;
+        const m = sim.membersOf(g)[0];
+        let x = 0, y = 0;
+        if (m !== undefined && isCollider(m)) { x = sim.world.colX[colliderOf(m)]; y = sim.world.colY[colliderOf(m)]; }
+        sim.fire(t, NONE, NONE, x, y);
+      }
+    });
+  },
+};
+
+export const crushed: TriggerBlock = {
+  type: 'crushed', category: 'trigger', label: 'Crushed', objectInput: 'required',
+  params: [],
+  provides: () => CTX_SELF | CTX_POINT,
+  setup(sim, t) {
+    const mask = sim.groupMask(t.objects);
+    const w = sim.world;
+    sim.hooks.crushed.push((i, x, y) => { if (mask[w.group[i]]) sim.fire(t, w.handleAt(i), NONE, x, y); });
+  },
+};
+
+export const TRIGGER_BLOCKS: TriggerBlock[] = [fill, crushed, 
   start, every, after, bounce, touch, crossTether, loseTether, leave, enter,
   valueReaches, counterReaches, groupCount, spawned, destroyed,
 ];

@@ -165,6 +165,48 @@ export const push: ActionBlock = {
   },
 };
 
+/** Points a ball in a new direction and keeps its speed, with an optional random spread. */
+export const aim: ActionBlock = {
+  type: 'aim', category: 'action', label: 'Aim',
+  params: [
+    ...targetParams({ kinds: ['ball'] }),
+    {
+      key: 'toward', label: 'Toward', type: 'enum', default: 'center',
+      options: [
+        { value: 'center', label: 'Center' },
+        { value: 'away', label: 'Away from hit', needs: CTX_POINT },
+        { value: 'random', label: 'Random' },
+        { value: 'angle', label: 'Angle' },
+      ],
+    },
+    { key: 'angle', label: 'Angle', type: 'angle', default: -90, min: -360, max: 360, step: 1, unit: '°', showIf: (p) => p.toward === 'angle' },
+    { key: 'spread', label: 'Spread', type: 'angle', default: 30, min: 0, max: 180, step: 1, unit: '°', showIf: (p) => p.toward !== 'random' },
+  ],
+  summary: (p, name) => `${targetText(p, name)} ${p.toward === 'angle' ? `${p.angle}°` : p.toward}${p.toward !== 'random' && Number(p.spread) ? ` ±${p.spread}°` : ''}`,
+  run(sim, n, e) {
+    const p = n.params;
+    const w = sim.world;
+    const spread = Number(p.spread) * D2R;
+    for (const ref of targets(sim, p, e)) {
+      const i = sim.bodyIdx(ref);
+      if (i < 0) continue;
+      let a: number;
+      switch (p.toward) {
+        case 'center': a = dmath.atan2(-w.y[i], -w.x[i]); break;
+        case 'away':
+          a = ref === e.self && (e.nx || e.ny) ? dmath.atan2(e.ny, e.nx) : dmath.atan2(w.y[i] - e.py, w.x[i] - e.px);
+          break;
+        case 'random': a = sim.rng.range(0, dmath.TAU); break;
+        default: a = Number(p.angle) * D2R;
+      }
+      if (p.toward !== 'random' && spread > 0) a += sim.rng.range(-spread, spread);
+      const sp = dmath.sqrt(w.vx[i] * w.vx[i] + w.vy[i] * w.vy[i]);
+      w.vx[i] = dmath.cos(a) * sp;
+      w.vy[i] = dmath.sin(a) * sp;
+    }
+  },
+};
+
 export const explode: ActionBlock = {
   type: 'explode', category: 'action', label: 'Explode',
   params: [
@@ -507,6 +549,6 @@ export const end: ActionBlock = {
 };
 
 export const ACTION_BLOCKS: ActionBlock[] = [
-  setProp, push, explode, duplicate, spawn, destroy, fallOff, damage, attachTether, cutTether,
+  setProp, push, aim, explode, duplicate, spawn, destroy, fallOff, damage, attachTether, cutTether,
   setGroup, setLook, counterAction, gravity, end,
 ];

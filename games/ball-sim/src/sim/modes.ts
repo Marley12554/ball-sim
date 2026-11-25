@@ -93,7 +93,7 @@ function ringEscape(v: number, seed: number): SimDef {
  * passes turn to powder, the tunnel wall knocks it back, and the remaining
  * rings snap back in around it. No gravity, steady speed.
  */
-export const GAUNTLET = { spin: 62, push: 150, jitter: 150, gap: 38, speed: 340 };
+export const GAUNTLET = { spin: 62, spread: 35, gap: 64, speed: 400 };
 function ringGauntlet(v: number, seed: number, r: Rng, g: G): SimDef {
   const count = v === 2 ? 10000 : 1000;
   const rings = g.n('ring', {
@@ -105,16 +105,17 @@ function ringGauntlet(v: number, seed: number, r: Rng, g: G): SimDef {
   g.n('counter', { name: 'Rings', source: 'count', group: rings, show: true, place: 'center' }, C[0], 380);
   const bounce = g.n('bounce', { wall: '' }, C[1], 40);
   // A nudge toward the middle on every bounce keeps the ball from skimming around the wall forever.
-  // Strong enough that the ball always leaves the wall at a real angle (a round wall otherwise keeps a shallow angle forever).
-  const inward = g.n('push', { target: 'self', direction: 'center', strength: GAUNTLET.push }, C[2], 0);
-  const jitter = g.n('push', { target: 'self', direction: 'random', strength: GAUNTLET.jitter }, C[2], 70);
+  // Every bounce sends the ball back across the circle. A round wall would otherwise keep a shallow angle forever.
+  const facing = g.n('wallFaces', { toward: 'center', within: 45 }, C[2], 0);
+  const aimBack = g.n('aim', { target: 'self', toward: 'center', spread: GAUNTLET.spread }, C[3], 0);
   const steady = g.n('setProp', { target: 'self', prop: 'speed', op: 'set', amount: GAUNTLET.speed }, C[2], 140);
   const leave = g.n('leave', { container: rings }, C[1], 160);
   const breakRing = g.n('destroy', { target: 'other' }, C[2], 160);
   const done = g.n('groupCount', { group: rings, cmp: 'atMost', value: 0 }, C[1], 280);
   const escaped = g.n('end', { label: `Escaped all ${count.toLocaleString('en-US')} rings in {time}` }, C[2], 280);
   g.w(ball, bounce, leave);
-  g.w(bounce, inward, jitter, steady);
+  g.w(bounce, facing, steady);
+  g.w(facing, aimBack);
   g.w(leave, breakRing);
   g.w(done, escaped);
   return def(v === 2 ? 'Ring Gauntlet 10K' : 'Ring Gauntlet', seed, g, { gravity: 0, clock: 'up', view: 330, camera: 'zoom', maxObjects: 16, speedLimit: 2000, restThreshold: 0, impactThreshold: 0 });

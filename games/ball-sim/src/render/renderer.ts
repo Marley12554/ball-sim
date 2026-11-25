@@ -784,9 +784,11 @@ export class Renderer {
         const text = formatNum(sim.counterValue(c));
         let big = Math.max(28, u * 7);
         // Fit inside the innermost ring when there's a ring stack around the center.
-        const R0 = sim.snapBack[0]?.R0;
-        if (R0) {
-          const rPx = R0 * this.scale * 0.82;
+        const sb = sim.snapBack[0];
+        if (sb) {
+          // Keep the size the camera zoom started with, but never spill past the current innermost ring.
+          const inner = sb.ptr < sb.order.length ? sim.world.colRingR[sb.order[sb.ptr]] : sb.R0;
+          const rPx = Math.min(sb.R0 * (this.viewR / this.baseViewR), inner) * this.scale * 0.82;
           big = Math.min(big, (rPx * 1.55) / (text.length * 0.62), rPx * 0.9);
         }
         g.save();

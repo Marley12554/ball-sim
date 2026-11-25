@@ -78,7 +78,7 @@ Dark, clean, modern, refined. Techno, but not neon or noisy. Shares a general th
 - Rings burst only after about 3 s of being packed solid. Balls may squeeze and overlap a little under pressure.
 - Doubling Sledge: a crushed ball comes out of the far face of the head that hit it, as if it clipped through. Nothing hides or fades.
 - Spiral Drop: the channel is barely wider than a ball so balls slide. One more ball each round, a bit faster.
-- Ring Gauntlet: the tunnel is a wedge (constant angle), calmer colors, the score fits inside the innermost ring. Slower spin (about 60°/s). The ball ricochets around the hole: every wall touch counts as a bounce and kicks it back across the circle, so it never slides along a ring. Closing rings keep their distance from the ball. The camera stays centered and pulls back when the ball breaks far out.
+- Ring Gauntlet: wedge tunnel (64°), calmer colors, score centered. Slower spin (about 60°/s). Each bounce off a ring's inner face aims the ball back across the circle (toward the center ±35°), so it never rides the wall. Tunnel side walls bounce normally so breakouts keep going. Closing rings keep their distance from the ball. The camera stays centered and pulls back when the ball breaks far out. A 1,000-ring run takes about 2 minutes.
 - Arena: speed stays constant (no drift from bounces). Sudden death only grows the fighters. Every weapon has a special move charged by five hits, explained in the panel. The boss is the Twemoji smiling imp.
 
 ## Build order

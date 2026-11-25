@@ -1,4 +1,4 @@
-import { CTX_SELF, CTX_OTHER } from '@engine/index';
+import { CTX_SELF, CTX_OTHER, CTX_POINT, dmath } from '@engine/index';
 import type { FilterBlock } from './types';
 import { BODY_PROPS, CMP, cmpSym, compare } from './types';
 
@@ -66,4 +66,22 @@ export const everyNth: FilterBlock = {
   },
 };
 
-export const FILTER_BLOCKS: FilterBlock[] = [chance, onlyIf, otherIs, everyNth];
+/** Passes when the surface that was hit faces the center (or away from it), within a tolerance. */
+export const wallFaces: FilterBlock = {
+  type: 'wallFaces', category: 'filter', label: 'Only if wall faces',
+  params: [
+    { key: 'toward', label: 'Toward', type: 'enum', default: 'center', options: [{ value: 'center', label: 'Center', needs: CTX_POINT }, { value: 'out', label: 'Outward', needs: CTX_POINT }] },
+    { key: 'within', label: 'Within', type: 'angle', default: 45, min: 0, max: 180, step: 1, unit: '°' },
+  ],
+  summary: (p) => `${p.toward === 'out' ? 'outward' : 'center'} ±${p.within}°`,
+  test(sim, n, e) {
+    if (!e.nx && !e.ny) return false;
+    const d = dmath.sqrt(e.px * e.px + e.py * e.py);
+    if (d < 1e-6) return true;
+    const sign = n.params.toward === 'out' ? 1 : -1;
+    const dot = sign * (e.nx * e.px + e.ny * e.py) / d;
+    return dot >= dmath.cos((Number(n.params.within) * dmath.PI) / 180);
+  },
+};
+
+export const FILTER_BLOCKS: FilterBlock[] = [chance, onlyIf, otherIs, everyNth, wallFaces];

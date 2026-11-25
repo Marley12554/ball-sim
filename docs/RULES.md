@@ -58,6 +58,7 @@ Every trigger also has **Cooldown** (per object) and **Max fires** (per object, 
 | Chance | percent |
 | Only if | self/other value (or impact speed) above/below |
 | Only if other | other group / same group / in / not in |
+| Only if wall faces | the surface that was hit faces the center (or outward), within an angle |
 | Every Nth | N |
 
 ## Actions
@@ -68,6 +69,7 @@ Most actions take a target: **self**, **other** or **a whole group**.
 |---|---|
 | Change | property (speed, size, HP, bounciness, mass, gravity, drag, spin), add/multiply/set, amount, optional limit. Target can also be *future spawns* of a group |
 | Push | forward, away from / toward the hit, to center, random, angle; strength |
+| Aim | point a ball toward the center, away from the hit, random or an angle, with a random spread; keeps its speed |
 | Explode | at the event point, center or a position; radius, strength |
 | Duplicate | copies; burst, split in size, or a trail over time |
 | Fall off | target leaves the plane toward the viewer and is removed |

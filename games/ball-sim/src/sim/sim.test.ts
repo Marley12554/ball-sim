@@ -29,7 +29,8 @@ describe('modes', () => {
   it('codes round-trip', () => {
     const m = MODES[3];
     const code = codeOf(m, 1, 987654);
-    expect(parseCode(code)).toEqual({ mode: m, variant: 1, seed: 987654 });
+    expect(parseCode(code)).toEqual({ mode: m, variant: 1, seed: 987654, look: '' });
+    expect(parseCode(codeOf(m, 0, 42, 'C'))).toEqual({ mode: m, variant: 0, seed: 42, look: 'C' });
     expect(fromCode(code.toLowerCase())?.code).toBe(code);
     expect(parseCode('ZZ1-ABC')).toBeNull();
   });
@@ -58,10 +59,11 @@ describe('mechanics', () => {
     expect(sim.countAllBalls()).toBeGreaterThan(8);
   });
 
-  it('sledge: crushed balls double and come back', () => {
+  it('sledge: crushed balls double and stay visible', () => {
     const sim = run('sledge', 0, 2, 25);
     expect(sim.countAllBalls()).toBeGreaterThan(12);
-    expect(sim.sledges[0].hidden.size).toBeLessThan(sim.countAllBalls());
+    // Crushed balls go through the head; none are hidden or faded.
+    for (let i = 0; i < sim.world.highWater; i++) if (sim.world.alive[i]) expect(sim.alpha[i]).toBe(1);
   });
 
   it('mitosis: cells divide', () => {

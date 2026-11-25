@@ -15,4 +15,9 @@ for (const r of rows) {
 }
 copyFileSync(join(src, 'LICENSE'), join(out, 'LICENSE.txt'));
 writeFileSync(join(out, 'README.txt'), 'Flags from flag-icons (https://github.com/lipis/flag-icons), MIT license.\n');
-console.log(`copied ${n} flags`);
+// Boss face: Twemoji smiling imp (CC-BY 4.0, https://github.com/jdecked/twemoji).
+const emojiOut = join(root, 'games/ball-sim/public/emoji');
+mkdirSync(emojiOut, { recursive: true });
+copyFileSync(join(root, 'node_modules/@twemoji/svg/1f608.svg'), join(emojiOut, 'imp.svg'));
+writeFileSync(join(emojiOut, 'README.txt'), 'Smiling imp from Twemoji (https://github.com/jdecked/twemoji), graphics licensed CC-BY 4.0.\n');
+console.log(`copied ${n} flags and the imp`);

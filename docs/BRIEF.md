@@ -70,6 +70,17 @@ Dark, clean, modern, refined. Techno, but not neon or noisy. Shares a general th
 - The sim view keeps the action clear of the top bar and the control bar.
 - No music yet.
 
+## Round 3 decisions (user feedback)
+
+- Presets are not random. Clicking a gallery card zooms its preview into a stage with a sidebar: variant list (Classic is the default), ball look chips, a weapon guide for weapon variants, Watch and Edit a copy. Gallery cards loop the default variant.
+- Short codes can carry a look letter: `AR5-4F9K2-C` (C colors, G gradients, P patterns, S spectrum, T countries, R anything).
+- Editing is easy to find: a labeled Edit chip in the sim view, Edit a copy in the panel, and copies open with the balls block selected so colors are right there.
+- Rings burst only after about 3 s of being packed solid. Balls may squeeze and overlap a little under pressure.
+- Doubling Sledge: a crushed ball comes out of the far face of the head that hit it, as if it clipped through. Nothing hides or fades.
+- Spiral Drop: the channel is barely wider than a ball so balls slide. One more ball each round, a bit faster.
+- Ring Gauntlet: the tunnel is a wedge (constant angle), calmer colors, the score fits inside the innermost ring. Each bounce nudges the ball inward so it can't skim along a ring.
+- Arena: speed stays constant (no drift from bounces). Sudden death only grows the fighters. Every weapon has a special move charged by five hits, explained in the panel. The boss is the Twemoji smiling imp.
+
 ## Build order
 
 1. Physics core. **Done.**

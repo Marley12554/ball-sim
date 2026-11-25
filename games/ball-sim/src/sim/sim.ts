@@ -76,7 +76,8 @@ export interface SpawnReq {
 /** Ring metadata kept so a ring can change size while its gaps keep a fixed width. */
 export interface RingMeta {
   group: number;
-  gaps: { at: number; len: number }[];
+  /** len: gap arc length. ang (if set): gap keeps this angle instead. */
+  gaps: { at: number; len: number; ang?: number }[];
   /** Index of this ring within its group (0 = innermost). */
   k: number;
 }
@@ -434,7 +435,6 @@ export class Sim {
     this.born[i] = this.time;
     this.pendingDead[i] = 0;
     this.arena.onCreate(i, from);
-    for (const sl of this.sledges) sl.onCreate(i, from);
     if (this.needProgress) this.resetProgress(i);
     return h;
   }
@@ -870,13 +870,29 @@ export class Sim {
       const u = Math.min(1, (this.time + this.dt - a.t0) / a.dur);
       const e = 1 - (1 - u) * (1 - u);
       const de = (2 * (1 - u)) / a.dur;
+      // Rings may close in on the ball but never sweep past it, and never grow.
+      let ballD = -1, ballR = 0;
+      for (let i = 0; i < w.highWater; i++) {
+        if (!this.inPlay(i)) continue;
+        ballD = dmath.sqrt((w.x[i] - w.colX[a.cols[0]]) ** 2 + (w.y[i] - w.colY[a.cols[0]]) ** 2);
+        ballR = w.r[i];
+        break;
+      }
+      let j = 0;
       for (let k = 0; k < a.cols.length; k++) {
         const c = a.cols[k];
         if (!w.colAlive[c]) continue;
         const meta = this.ringMeta[c];
         if (!meta) continue;
-        const R = a.from[k] + (a.to[k] - a.from[k]) * e;
-        const growth = u >= 1 ? 0 : ((a.to[k] - a.from[k]) * de) / Math.max(1, R);
+        const prev = w.colRingR[c];
+        const ht = w.pHt[w.colPieceStart[c]] ?? 1.5;
+        // A ring the ball is already crossing is left alone (it is about to break).
+        if (ballD >= 0 && prev < ballD + ballR + ht) continue;
+        const target = a.from[k] + (a.to[k] - a.from[k]) * e;
+        const floor = ballD >= 0 ? ballD + ballR + ht + 1 + j * sb.spacing : 0;
+        const R = Math.min(prev, Math.max(target, floor));
+        j++;
+        const growth = u >= 1 ? 0 : (R - prev) / this.dt / Math.max(1, R);
         this.reshapeRing(c, meta, R, growth);
       }
       if (u >= 1) sb.anim = null;
@@ -896,6 +912,12 @@ export class Sim {
       break;
     }
     if (!found || vr >= 0) return;
+    // Only once the ball is clearly back inside the innermost ring.
+    {
+      let d = 0;
+      for (let i = 0; i < w.highWater; i++) if (this.inPlay(i)) { d = dmath.sqrt((w.x[i] - cx) ** 2 + (w.y[i] - cy) ** 2) + w.r[i]; break; }
+      if (d > w.colRingR[inner] - sb.spacing) return;
+    }
     const cols: number[] = [], from: number[] = [], to: number[] = [];
     let j = 0;
     for (let k = sb.ptr; k < sb.order.length; k++) {
@@ -916,7 +938,7 @@ export class Sim {
     const w = this.world;
     const gs = meta.gaps
       .map((g) => {
-        const wdt = Math.min(g.len / R, (dmath.TAU * 0.9) / meta.gaps.length);
+        const wdt = Math.min(g.ang ?? g.len / R, (dmath.TAU * 0.9) / meta.gaps.length);
         let s = (g.at - wdt / 2) % dmath.TAU;
         if (s < 0) s += dmath.TAU;
         return { s, wdt };

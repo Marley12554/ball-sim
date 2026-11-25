@@ -28,3 +28,4 @@ npm run build    # outputs dist/
 Add an object to the right file in `games/ball-sim/src/sim/blocks/` and list it in that file's export array. The block carries its params, connector shape and behavior. The editor, inspector and runtime pick it up automatically.
 
 Flags are from [flag-icons](https://github.com/lipis/flag-icons) (MIT).
+The Arena boss uses the smiling imp from [Twemoji](https://github.com/jdecked/twemoji), © Twitter, Inc and other contributors, licensed [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/).

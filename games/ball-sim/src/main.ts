@@ -27,7 +27,7 @@ async function route() {
       const mode = MODES.find((m) => m.id === arg);
       if (!mode) return navigate('#/');
       const v = parts[2] ? Math.max(0, Math.min(mode.variants.length - 1, Number(parts[2]) - 1)) : undefined;
-      history.replaceState(null, '', `#/g/${randomOf(mode, v).code}`);
+      history.replaceState(null, '', `#/g/${randomOf(mode, v ?? 0).code}`);
       return route();
     }
     if (kind === 'g') {
@@ -40,7 +40,7 @@ async function route() {
         code: gen.code,
         editHref: `#/edit/g:${gen.code}`,
         reroll: () => {
-          const next = randomOf(gen.mode, gen.variant);
+          const next = randomOf(gen.mode, gen.variant, gen.look);
           prepareEnter(root, MODE_COLOR[gen.mode.id] ?? '#FFFFFF', root.querySelector('canvas'));
           navigate(`#/g/${next.code}`);
         },

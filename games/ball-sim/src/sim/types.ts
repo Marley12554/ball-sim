@@ -82,6 +82,7 @@ export type Fx =
   | { k: 'zap'; x: number; y: number; x2: number; y2: number }
   | { k: 'clash'; x: number; y: number }
   | { k: 'swallow'; x: number; y: number; n: number }
+  | { k: 'special'; x: number; y: number; kind: string; name: string }
   | { k: 'end'; label: string };
 
 /** Event passed through trigger chains. Entity refs: body handle >= 0, collider -(id+2), zone -(ZONE_BASE+i+2). */

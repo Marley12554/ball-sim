@@ -274,7 +274,17 @@ class AudioEngine {
         case 'damage':
           if (!this.budget(12)) break;
           if (f.blocked && f.amount <= 0) this.tone(1500, 0.12, 0.06, 'square', pan);
-          else this.tone(140, 0.2, 0.16, 'sine', pan, 0.002, 70);
+          else {
+            // Punchy hit: a click, a body thump and a short crunch.
+            this.burst(0.05, 0.28, 'bandpass', 2600, 1.2, pan);
+            this.tone(180, 0.22, 0.26, 'sine', pan, 0.001, 60);
+            this.burst(0.12, 0.12, 'lowpass', 900, 0.7, pan, 200);
+          }
+          break;
+        case 'special':
+          this.burst(0.6, 0.22, 'bandpass', 400, 0.8, pan, 5000);
+          this.tone(220, 0.5, 0.14, 'sawtooth', pan, 0.01, 880);
+          setTimeout(() => this.canPlay() && this.tone(880, 0.5, 0.08, 'triangle', pan, 0.005), 160);
           break;
         case 'zap':
           this.burst(0.25, 0.25, 'highpass', 2500, 0.5, pan);

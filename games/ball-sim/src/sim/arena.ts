@@ -20,6 +20,19 @@ export const WEAPON_STATS: Record<WeaponType, { len: number; spin: number; dmg: 
   shield: { len: 2.1, spin: 1.7, dmg: 1, knock: 380, grow: 0.5 },
 };
 
+/** What each weapon does, for the panel and the health cards. */
+export const WEAPON_INFO: Record<WeaponType, { name: string; does: string; special: string; specialDoes: string }> = {
+  sword: { name: 'Sword', does: 'Fast slashes. Every hit adds damage.', special: 'Whirlwind', specialDoes: 'Spins twice as fast and hits harder for a few seconds.' },
+  spear: { name: 'Spear', does: 'Long reach that grows with hits. Hurts more at speed.', special: 'Lunge', specialDoes: 'Dashes at the nearest enemy. The next hit does triple damage.' },
+  hammer: { name: 'Sledgehammer', does: 'Slow, heavy hits and huge knockback that keeps growing.', special: 'Quake', specialDoes: 'A shockwave that damages and throws back everyone nearby.' },
+  match: { name: 'Match', does: 'Sets enemies on fire. Each hit adds burn time and leaves flames.', special: 'Inferno', specialDoes: 'Surrounds itself with a ring of fire.' },
+  rod: { name: 'Lightning rod', does: 'Zaps the nearest enemy on a timer, chaining to a second.', special: 'Storm', specialDoes: 'Strikes every enemy in range at once.' },
+  shield: { name: 'Shield', does: 'Blocks weapons and bashes. Gets stronger with every block.', special: 'Bulwark', specialDoes: 'Gains 3 shield and reflects damage for a few seconds.' },
+};
+
+/** Hits (or zaps and blocks) needed to charge a special. */
+export const SPECIAL_CHARGE = 5;
+
 export interface PickupCfg {
   kinds: PowerupKind[];
   min: number;
@@ -58,6 +71,9 @@ export class Arena {
   readonly wHits: Float64Array;
   readonly wTimer: Float64Array;
   readonly wTeams: Uint8Array;
+  /** Special meter (0..SPECIAL_CHARGE) and when the active special ends. */
+  readonly wCharge: Float64Array;
+  readonly specUntil: Float64Array;
   pickups: Pickup[] = [];
   pickupCfg: PickupCfg | null = null;
   nextPickup = 0;
@@ -79,6 +95,8 @@ export class Arena {
     this.wHits = new Float64Array(n);
     this.wTimer = new Float64Array(n);
     this.wTeams = new Uint8Array(n);
+    this.wCharge = new Float64Array(n);
+    this.specUntil = new Float64Array(n);
   }
 
   get active(): boolean {
@@ -93,6 +111,8 @@ export class Arena {
     this.lastHitBy[i] = -1;
     this.wType[i] = -1;
     this.wHits[i] = 0;
+    this.wCharge[i] = 0;
+    this.specUntil[i] = 0;
     void from;
     const g = this.sim.world.group[i];
     for (const wc of this.weaponCfgs) if (wc.holders[g]) this.arm(i, wc);
@@ -124,6 +144,10 @@ export class Arena {
     let blocked = false;
     while (total >= 1 && this.shield[target] > 0) { this.shield[target]--; total -= 1; blocked = true; }
     if (total > 0) sim.hp[target] = Math.max(0, sim.hp[target] - total);
+    // Bulwark reflects half of what gets through back at the attacker.
+    if (attacker >= 0 && total > 0 && this.wType[target] === WEAPON_TYPES.indexOf('shield') && this.specUntil[target] > sim.time && sim.inPlay(attacker)) {
+      sim.hp[attacker] = Math.max(0, sim.hp[attacker] - total / 2);
+    }
     this.lastHitBy[target] = attacker;
     sim.emit({ k: 'damage', x: sim.world.x[target], y: sim.world.y[target], amount: total, blocked });
   }
@@ -263,7 +287,8 @@ export class Arena {
     const A = [0, 0, 0, 0], B = [0, 0, 0, 0];
     for (let i = 0; i < w.highWater; i++) {
       if (this.wType[i] < 0 || !sim.inPlay(i)) continue;
-      this.wAngle[i] += this.wSpin[i] * dt;
+      const whirl = this.wType[i] === 0 && this.specUntil[i] > t ? 2.4 : 1;
+      this.wAngle[i] += this.wSpin[i] * dt * whirl;
     }
     for (let i = 0; i < w.highWater; i++) {
       if (this.wType[i] < 0 || !sim.inPlay(i)) continue;
@@ -288,6 +313,7 @@ export class Arena {
               this.zaps.push({ x: w.x[j], y: w.y[j], x2: w.x[k2], y2: w.y[k2], t });
             }
             this.wHits[i]++;
+            this.charge(i, teams);
           }
         }
       }
@@ -301,8 +327,8 @@ export class Arena {
             this.wSpin[j] = -this.wSpin[j];
             const mx = (A[2] + B[2]) / 2, my = (A[3] + B[3]) / 2;
             sim.emit({ k: 'clash', x: mx, y: my });
-            if (WEAPON_TYPES[this.wType[j]] === 'shield') this.wHits[j]++;
-            if (type === 'shield') this.wHits[i]++;
+            if (WEAPON_TYPES[this.wType[j]] === 'shield') { this.wHits[j]++; this.charge(j, this.wTeams[j] === 1); }
+            if (type === 'shield') { this.wHits[i]++; this.charge(i, teams); }
             continue;
           }
         }
@@ -314,6 +340,9 @@ export class Arena {
         if (type === 'sword' || type === 'hammer') dmg += st.grow * this.wHits[i];
         if (type === 'spear') dmg += Math.min(2, Math.hypot(w.vx[i] - w.vx[j], w.vy[i] - w.vy[j]) / 400);
         if (type === 'shield') dmg += 0.5 * Math.floor(this.wHits[i] / 2);
+        const active = this.specUntil[i] > t;
+        if (active && type === 'sword') dmg += 1;
+        if (active && type === 'spear') { dmg *= 3; this.specUntil[i] = 0; }
         this.damage(j, dmg, i);
         if (type === 'match') {
           this.burnUntil[j] = Math.max(this.burnUntil[j], t) + (this.burnUntil[j] > t ? 0.5 : 3);
@@ -321,12 +350,77 @@ export class Arena {
           this.flames.push({ x: w.x[j], y: w.y[j], born: t, owner: i, team: teams ? w.group[i] : -1, r: w.r[i] * 0.9 });
         }
         this.wHits[i]++;
+        this.charge(i, teams);
         const kx = w.x[j] - w.x[i], ky = w.y[j] - w.y[i];
         const kl = Math.hypot(kx, ky) || 1;
         const knock = st.knock * (type === 'hammer' ? 1 + 0.1 * this.wHits[i] : 1);
         if (w.invMass[j] > 0) { w.vx[j] += (kx / kl) * knock; w.vy[j] += (ky / kl) * knock; }
         sim.emit({ k: 'clash', x: w.x[j], y: w.y[j] });
       }
+    }
+  }
+
+  /** Add charge; a full meter fires the weapon's special. */
+  private charge(i: number, teams: boolean): void {
+    if (this.specUntil[i] > this.sim.time) return;
+    this.wCharge[i] += 1;
+    if (this.wCharge[i] >= SPECIAL_CHARGE) {
+      this.wCharge[i] = 0;
+      this.special(i, teams);
+    }
+  }
+
+  private special(i: number, teams: boolean): void {
+    const sim = this.sim, w = sim.world, t = sim.time;
+    const type = WEAPON_TYPES[this.wType[i]];
+    const info = WEAPON_INFO[type];
+    sim.emit({ k: 'special', x: w.x[i], y: w.y[i], kind: type, name: info.special });
+    const r = w.r[i];
+    switch (type) {
+      case 'sword':
+        this.specUntil[i] = t + 3;
+        break;
+      case 'spear': {
+        this.specUntil[i] = t + 2.5;
+        const j = this.nearestEnemy(i, w.x[i], w.y[i], 1e9, -1, teams);
+        if (j >= 0) {
+          const dx = w.x[j] - w.x[i], dy = w.y[j] - w.y[i], d = Math.hypot(dx, dy) || 1;
+          w.vx[i] = (dx / d) * 900; w.vy[i] = (dy / d) * 900;
+          this.wAngle[i] = dmath.atan2(dy, dx);
+        }
+        break;
+      }
+      case 'hammer':
+        for (let j = 0; j < w.highWater; j++) {
+          if (!sim.inPlay(j) || !this.enemies(i, j, teams)) continue;
+          const dx = w.x[j] - w.x[i], dy = w.y[j] - w.y[i], d = Math.hypot(dx, dy) || 1;
+          if (d > r * 8) continue;
+          this.damage(j, 2, i);
+          const k = 800 * (1 - d / (r * 8)) + 200;
+          if (w.invMass[j] > 0) { w.vx[j] += (dx / d) * k; w.vy[j] += (dy / d) * k; }
+        }
+        sim.flash.push({ x: w.x[i], y: w.y[i], r: r * 8, t });
+        sim.emit({ k: 'boom', x: w.x[i], y: w.y[i], big: false });
+        break;
+      case 'match':
+        for (let k = 0; k < 10; k++) {
+          const a = (k / 10) * dmath.TAU;
+          this.flames.push({ x: w.x[i] + dmath.cos(a) * r * 3, y: w.y[i] + dmath.sin(a) * r * 3, born: t, owner: i, team: teams ? w.group[i] : -1, r: r * 1.1 });
+        }
+        break;
+      case 'rod':
+        for (let j = 0; j < w.highWater; j++) {
+          if (!sim.inPlay(j) || !this.enemies(i, j, teams)) continue;
+          if (Math.hypot(w.x[j] - w.x[i], w.y[j] - w.y[i]) > r * 16) continue;
+          this.damage(j, 2 + 0.2 * this.wHits[i], i);
+          this.zaps.push({ x: w.x[i], y: w.y[i], x2: w.x[j], y2: w.y[j], t });
+          sim.emit({ k: 'zap', x: w.x[i], y: w.y[i], x2: w.x[j], y2: w.y[j] });
+        }
+        break;
+      case 'shield':
+        this.shield[i] = Math.min(9, this.shield[i] + 3);
+        this.specUntil[i] = t + 3;
+        break;
     }
   }
 

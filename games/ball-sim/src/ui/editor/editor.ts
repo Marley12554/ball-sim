@@ -100,6 +100,11 @@ export class Editor {
     this.root = h('div', { class: 'editor' }, top, this.paletteEl, this.graph.el, this.sideEl);
     this.graph.el.append(fab);
 
+    // A fresh copy opens with its balls selected, so looks and colors are right there.
+    if (!this.id && !window.matchMedia('(max-width: 900px)').matches) {
+      const ball = this.def.graph.nodes.find((n) => n.type === 'ball');
+      if (ball) { this.sel = { kind: 'node', id: ball.id }; this.graph.render(); }
+    }
     this.renderInspector();
     this.updateUndo();
 

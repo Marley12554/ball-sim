@@ -1,8 +1,8 @@
 import type { Sim } from '../sim/sim';
 import type { Fx } from '../sim/types';
-import { WEAPON_TYPES, POWERUP_COLOR } from '../sim/arena';
+import { WEAPON_TYPES, POWERUP_COLOR, WEAPON_INFO, SPECIAL_CHARGE } from '../sim/arena';
 import { SpriteCache, colorOfLook } from './sprites';
-import { titaniumBlock, steelRod, drawWeapon, drawPowerup, flame, horns, titaniumFill, shade } from './art';
+import { titaniumBlock, steelRod, drawWeapon, drawPowerup, flame, titaniumFill, shade } from './art';
 
 export interface DrawOptions {
   hud?: boolean;
@@ -18,7 +18,8 @@ const SANS = '"Geist", system-ui, -apple-system, Segoe UI, sans-serif';
 interface Particle { x: number; y: number; vx: number; vy: number; life: number; max: number; size: number; color: string; grav: number }
 interface Light { x: number; y: number; r: number; a: number; color: string; t: number; life: number }
 interface Ring { x: number; y: number; r0: number; r1: number; t: number; life: number; color: string; width: number }
-interface Floater { x: number; y: number; text: string; t: number; color: string }
+interface Floater { x: number; y: number; text: string; t: number; color: string; big?: boolean }
+const SPECIAL_COLOR: Record<string, string> = { sword: '#E2E8F0', spear: '#FDE68A', hammer: '#FB923C', match: '#F97316', rod: '#67E8F9', shield: '#38E1F5' };
 
 let grainTile: HTMLCanvasElement | null = null;
 function grain(): HTMLCanvasElement {
@@ -132,7 +133,22 @@ export class Renderer {
           this.ring(f.x, f.y, 6, 60, 0.45, POWERUP_COLOR[f.kind as keyof typeof POWERUP_COLOR] ?? '#FFFFFF', 3);
           this.light(f.x, f.y, 120, 0.6, POWERUP_COLOR[f.kind as keyof typeof POWERUP_COLOR] ?? '#FFFFFF', 0.4);
           break;
+        case 'special': {
+          const col = SPECIAL_COLOR[f.kind] ?? '#FFFFFF';
+          this.ring(f.x, f.y, 10, 140, 0.6, col, 5);
+          this.ring(f.x, f.y, 10, 90, 0.45, '#FFFFFF', 2);
+          this.light(f.x, f.y, 260, 0.9, col, 0.6);
+          this.sparks(f.x, f.y, 24, col, 520, 2.5);
+          this.floaters.push({ x: f.x, y: f.y - 24, text: f.name, t: this.clock, color: col, big: true });
+          this.shake = Math.max(this.shake, 0.45);
+          break;
+        }
         case 'damage':
+          if (f.amount > 0) {
+            this.light(f.x, f.y, 90, 0.5, '#FF5A6A', 0.25);
+            this.sparks(f.x, f.y, 5, '#FFB3BA', 260, 1.8);
+            this.shake = Math.max(this.shake, Math.min(0.3, 0.1 + f.amount * 0.06));
+          }
           if (f.amount > 0) this.floaters.push({ x: f.x, y: f.y, text: `−${fmt(f.amount)}`, t: this.clock, color: '#FF7A85' });
           else if (f.blocked) this.floaters.push({ x: f.x, y: f.y, text: 'blocked', t: this.clock, color: '#67E8F9' });
           break;
@@ -296,7 +312,9 @@ export class Renderer {
       flame(g, f.x, f.y, f.r * (0.8 + age * 0.15) * (0.6 + k * 0.4), this.clock);
     }
 
+    if (this.roster.length && !opts.lite) this.drawFloor(px);
     this.drawWalls(sim, px, vx0, vy0, vx1, vy1, opts.lite);
+    if (this.roster.length) this.drawTrails(sim, px);
     for (const sl of sim.sledges) this.drawSledge(sim, sl);
 
     // Tethers
@@ -376,14 +394,15 @@ export class Renderer {
     g.globalAlpha = 1;
 
     // Floating damage numbers
-    this.floaters = this.floaters.filter((f) => this.clock - f.t < 0.9);
+    this.floaters = this.floaters.filter((f) => this.clock - f.t < (f.big ? 1.4 : 0.9));
     g.textAlign = 'center';
     g.textBaseline = 'middle';
     for (const f of this.floaters) {
-      const k = (this.clock - f.t) / 0.9;
-      g.globalAlpha = 1 - k;
+      const life = f.big ? 1.4 : 0.9;
+      const k = (this.clock - f.t) / life;
+      g.globalAlpha = 1 - k * k;
       g.fillStyle = f.color;
-      g.font = `600 ${16 * px * 1.6}px ${MONO}`;
+      g.font = f.big ? `700 ${30 * px * 1.6 * (1 + 0.25 * (1 - k))}px ${SANS}` : `600 ${16 * px * 1.6}px ${MONO}`;
       g.fillText(f.text, f.x, f.y - 26 - k * 30);
     }
     g.globalAlpha = 1;
@@ -612,9 +631,8 @@ export class Renderer {
       const spr = this.sprites.get(look, r * 2 * this.scale, square);
       if (a < 1) g.globalAlpha = a;
       g.drawImage(spr, w.x[i] - r, w.y[i] - r, r * 2, r * 2);
-      if (look.t === 'imp') horns(g, w.x[i], w.y[i], r);
       // Fighters get a crisp rim so dark looks read on the dark ground; buffs color it.
-      if (sim.maxHp[i] > 0) {
+      if (sim.maxHp[i] > 0 && look.t !== 'imp') {
         const reds = sim.arena.redCount(i);
         const lw = Math.max(px * 1.5, r * 0.08);
         g.lineWidth = reds ? lw * 1.8 : lw;
@@ -648,6 +666,50 @@ export class Renderer {
       }
       if (a < 1) g.globalAlpha = 1;
     }
+  }
+
+  private trails = new Map<number, number[]>();
+
+  /** Fading afterimages behind fighters, so motion reads at a glance. */
+  private drawTrails(sim: Sim, px: number): void {
+    const g = this.ctx, w = sim.world;
+    for (let i = 0; i < w.highWater; i++) {
+      if (!w.alive[i] || sim.maxHp[i] <= 0 || !sim.inPlay(i)) { this.trails.delete(i); continue; }
+      let tr = this.trails.get(i);
+      if (!tr) { tr = []; this.trails.set(i, tr); }
+      tr.push(w.x[i], w.y[i]);
+      if (tr.length > 28) tr.splice(0, 2);
+      const col = this.colorOf(sim, sim.look[i]);
+      const n = tr.length / 2;
+      g.lineCap = 'round';
+      for (let k = 1; k < n; k++) {
+        const a = k / n;
+        g.strokeStyle = hexA(col, a * 0.35);
+        g.lineWidth = Math.max(px, w.r[i] * 1.4 * a);
+        g.beginPath();
+        g.moveTo(tr[(k - 1) * 2], tr[(k - 1) * 2 + 1]);
+        g.lineTo(tr[k * 2], tr[k * 2 + 1]);
+        g.stroke();
+      }
+    }
+  }
+
+  /** A lit floor with a faint grid for arenas. */
+  private drawFloor(px: number): void {
+    const g = this.ctx;
+    const R = this.viewR / 1.04;
+    const glow = g.createRadialGradient(0, 0, 0, 0, 0, R * 1.2);
+    glow.addColorStop(0, 'rgba(120,140,170,0.10)');
+    glow.addColorStop(1, 'rgba(120,140,170,0)');
+    g.fillStyle = glow;
+    g.fillRect(-R, -R, R * 2, R * 2);
+    g.strokeStyle = 'rgba(255,255,255,0.035)';
+    g.lineWidth = px;
+    const step = 30;
+    g.beginPath();
+    for (let x = -Math.floor(R / step) * step; x <= R; x += step) { g.moveTo(x, -R); g.lineTo(x, R); }
+    for (let y = -Math.floor(R / step) * step; y <= R; y += step) { g.moveTo(-R, y); g.lineTo(R, y); }
+    g.stroke();
   }
 
   private drawFalling(sim: Sim): void {
@@ -711,7 +773,14 @@ export class Renderer {
         // Big score in the middle of the sim.
         const L = this.layout;
         const cy = L.top + (H - L.top - L.bottom) / 2;
-        const big = Math.max(28, u * 7);
+        const text = formatNum(sim.counterValue(c));
+        let big = Math.max(28, u * 7);
+        // Fit inside the innermost ring when there's a ring stack around the center.
+        const R0 = sim.snapBack[0]?.R0;
+        if (R0) {
+          const rPx = R0 * this.scale * 0.82;
+          big = Math.min(big, (rPx * 1.55) / (text.length * 0.62), rPx * 0.9);
+        }
         g.save();
         g.textAlign = 'center';
         g.textBaseline = 'middle';
@@ -719,7 +788,7 @@ export class Renderer {
         g.shadowColor = 'rgba(0,0,0,0.6)';
         g.shadowBlur = big * 0.4;
         g.fillStyle = '#FFFFFF';
-        g.fillText(formatNum(sim.counterValue(c)), W / 2, cy);
+        g.fillText(text, W / 2, cy);
         g.restore();
         g.textAlign = 'left';
         g.textBaseline = 'top';
@@ -859,6 +928,21 @@ export class Renderer {
         g.beginPath(); roundRect(g, tx, by, Math.max(bh, bw * f), bh, bh / 2); g.fill();
       }
       const i = w.indexOf(r.h);
+      if (i >= 0 && !r.dead && sim.arena.wType[i] >= 0) {
+        // Weapon name under the name, and the special's charge as a thin meter.
+        const type = WEAPON_TYPES[sim.arena.wType[i]];
+        const active = sim.arena.specUntil[i] > sim.time;
+        const f2 = active ? 1 : sim.arena.wCharge[i] / SPECIAL_CHARGE;
+        const my = by + bh + 4, mh = Math.max(3, bh * 0.45);
+        g.fillStyle = 'rgba(255,255,255,0.06)';
+        g.fillRect(tx, my, bw, mh);
+        g.fillStyle = active ? SPECIAL_COLOR[type] : 'rgba(255,214,102,0.85)';
+        g.fillRect(tx, my, bw * f2, mh);
+        g.font = `500 ${Math.max(9, ch * 0.18)}px ${MONO}`;
+        g.textAlign = 'left';
+        g.fillStyle = active ? SPECIAL_COLOR[type] : '#8A919C';
+        g.fillText(active ? WEAPON_INFO[type].special.toUpperCase() : WEAPON_INFO[type].name.toUpperCase(), tx, y + ch * 0.4);
+      }
       if (i >= 0 && !r.dead) {
         let pipX = tx;
         for (let k = 0; k < sim.arena.shield[i]; k++) { g.fillStyle = '#38E1F5'; g.fillRect(pipX, by + bh + 3, bh * 1.2, bh * 0.6); pipX += bh * 1.6; }

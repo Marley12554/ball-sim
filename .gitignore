@@ -2,3 +2,4 @@ node_modules
 dist
 *.log
 games/ball-sim/public/flags
+games/ball-sim/public/emoji

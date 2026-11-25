@@ -75,7 +75,7 @@ export function mountViewer(root: HTMLElement, o: ViewerOptions): () => void {
       spawnMore,
       h('div', { class: 'sep' }),
       o.reroll ? iconButton('dice', 'Another one', () => o.reroll!()) : null,
-      iconButton('edit', 'Edit', () => navigate(o.editHref)),
+      h('button', { class: 'chip edit-chip', title: 'Change rules, colors and anything else', onclick: () => navigate(o.editHref) }, icon('edit', 16), 'Edit'),
       recBtn),
   );
   const page = h('div', { class: 'viewer' }, canvas, overlay, recDot);

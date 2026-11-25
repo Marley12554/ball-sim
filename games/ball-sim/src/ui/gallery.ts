@@ -9,6 +9,7 @@ import { prepareEnter } from './transition';
 import { openImagesModal } from './images';
 import { soundButton } from './sound';
 import { openCode } from './codes';
+import { openModePanel } from './modepanel';
 
 /** One accent per mode, used for the card glow and the entry bloom. */
 export const MODE_COLOR: Record<string, string> = {
@@ -41,7 +42,7 @@ export function mountGallery(root: HTMLElement): () => void {
     const el = h('button', { class: 'card', style: { '--glow': color } as any },
       h('div', { class: 'card-canvas' }, canvas, outcome),
       h('div', { class: 'card-body' },
-        h('div', { class: 'card-title' }, h('i', { class: 'card-dot' }), mode.name),
+        h('div', { class: 'card-title' }, h('i', { class: 'card-dot' }), mode.name, h('span', { class: 'card-pick' }, icon('sliders', 14), 'Customize')),
         meta));
     const show = (g: Generated) => {
       card.gen = g;
@@ -50,13 +51,9 @@ export function mountGallery(root: HTMLElement): () => void {
     const first = randomOf(mode);
     card.p = new Player(canvas, first.def, { loop: true, budgetMs: 3, dprCap: 1.5, lite: true });
     show(first);
-    // Each loop plays a different random sim of this mode.
+    // Each loop plays a new layout of the default variant.
     card.p.nextDef = () => { const g = randomOf(mode); show(g); return g.def; };
-    el.addEventListener('click', () => {
-      if (!card.gen) return;
-      prepareEnter(canvas, color, canvas);
-      navigate(`#/g/${card.gen.code}`);
-    });
+    el.addEventListener('click', () => openModePanel(mode, canvas, color));
     cards.push(card);
     io.observe(canvas);
     return el;

@@ -37,18 +37,15 @@ export function solidBlock(x0: number, y0: number, x1: number, y1: number, edge 
 
 /**
  * Doubling sledge: a two-headed hammer pivoting at its center that rests
- * against titanium stops, then slams to the other side. Balls caught in the
- * closing gap between a head and a stop are swallowed (hidden, out of the
- * physics) and come back as the head pulls away, so pressure never jams the
- * hammer or squeezes balls through walls.
+ * against titanium stops, then slams to the other side. A ball caught in the
+ * closing gap between a head and a stop is crushed through the head and comes
+ * out of its far face, so pressure never jams the hammer.
  */
 export class Sledge {
   readonly hammer: number;
   readonly stops: number[] = [];
   readonly thA: number;
   readonly thB: number;
-  /** Body index -> head (+1 top, -1 bottom). */
-  hidden = new Map<number, number>();
   private crushQueue: number[] = [];
   private prevSwinging = false;
   /** Seconds since the last slam (for screen shake). */
@@ -125,8 +122,6 @@ export class Sledge {
   afterStep(): void {
     const sim = this.sim, w = sim.world;
     if (!w.colAlive[this.hammer]) {
-      // Hammer gone (ring burst etc.): release everything.
-      for (const i of this.hidden.keys()) this.reveal(i);
       return;
     }
     const th = w.colAngle[this.hammer];
@@ -148,57 +143,37 @@ export class Sledge {
         const ahead = lead > 0 ? ly - hw2 : -hw2 - ly;
         const toStop = lead > 0 ? hw2 - lyT : lyT + hw2;
         if (ahead < -r * 0.3 || toStop < -r * 0.3) continue;
-        if (ahead + toStop < 2 * r * 0.98) this.hide(i, head, true);
+        if (ahead + toStop < 2 * r * 0.98) this.crushThrough(i, head, lead, lx, th);
       }
     }
-    // Reveal swallowed balls once the head no longer covers them.
-    if (this.hidden.size) {
-      for (const [i, head] of this.hidden) {
-        if (!w.alive[i]) { this.hidden.delete(i); continue; }
-        const [lx, ly] = this.local(w.x[i], w.y[i], th);
-        const dx = Math.max(0, Math.abs(lx - head * L) - hl / 2);
-        const dy = Math.max(0, Math.abs(ly) - hw2);
-        if (Math.hypot(dx, dy) >= w.r[i] * 0.9) this.reveal(i);
-      }
-    }
-    // Fade revealed balls back in.
-    for (let i = 0; i < w.highWater; i++) {
-      if (w.alive[i] && !w.frozen[i] && sim.alpha[i] < 1) sim.alpha[i] = Math.min(1, sim.alpha[i] + sim.dt / 0.25);
-    }
   }
 
-  private hide(i: number, head: number, crushed: boolean): void {
+  /**
+   * A caught ball comes straight out of the head's far face, as if it was
+   * crushed through it, moving with the hammer plus a push away from the head.
+   */
+  private crushThrough(i: number, head: number, lead: number, lx: number, th: number): void {
     const sim = this.sim, w = sim.world;
-    w.frozen[i] = 1;
-    w.mask[i] = 0;
-    w.vx[i] = 0;
-    w.vy[i] = 0;
-    sim.alpha[i] = 0;
-    this.hidden.set(i, head);
-    if (crushed) {
-      this.crushQueue.push(i);
-      sim.emit({ k: 'swallow', x: w.x[i], y: w.y[i], n: 1 });
-    }
-  }
-
-  private reveal(i: number): void {
-    const sim = this.sim, w = sim.world;
-    this.hidden.delete(i);
-    if (!w.alive[i]) return;
-    w.frozen[i] = 0;
-    w.mask[i] = sim.savedMask[i];
-    w.soft[i] = 0.8;
-    sim.alpha[i] = Math.max(sim.alpha[i], 0.05);
-  }
-
-  /** Copies of swallowed balls start swallowed too, next to the original. */
-  onCreate(i: number, from: number): void {
-    if (from < 0 || !this.hidden.has(from)) return;
-    const sim = this.sim, w = sim.world;
-    const a = sim.rng.range(0, dmath.TAU);
-    w.x[i] = w.x[from] + dmath.cos(a) * w.r[from] * 0.5;
-    w.y[i] = w.y[from] + dmath.sin(a) * w.r[from] * 0.5;
-    this.hide(i, this.hidden.get(from)!, false);
+    const { length: L, headLength: hl, headWidth: hw } = this.cfg;
+    const r = w.r[i];
+    const inner = L - hl / 2 + r, outer = L + hl / 2 - r;
+    const ax = Math.min(outer, Math.max(inner, Math.abs(lx))) * head;
+    const ly = -lead * (hw / 2 + r + 1);
+    const c = dmath.cos(th), s = dmath.sin(th);
+    const px = c * ax - s * ly, py = s * ax + c * ly;
+    w.x[i] = this.cfg.x + px;
+    w.y[i] = this.cfg.y + py;
+    const om = w.colW[this.hammer];
+    // Local -lead y axis in world space.
+    const dx = -lead * -s, dy = -lead * c;
+    const push = 160 + sim.rng.range(0, 120);
+    const spread = sim.rng.range(-0.35, 0.35);
+    const cs = dmath.cos(spread), sn = dmath.sin(spread);
+    w.vx[i] = -om * py + (dx * cs - dy * sn) * push;
+    w.vy[i] = om * px + (dx * sn + dy * cs) * push;
+    w.soft[i] = 0.35;
+    this.crushQueue.push(i);
+    sim.emit({ k: 'swallow', x: w.x[i], y: w.y[i], n: 1 });
   }
 
   fireCrushes(): void {

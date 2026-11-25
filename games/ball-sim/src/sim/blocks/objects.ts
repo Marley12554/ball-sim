@@ -113,7 +113,7 @@ export const ringBlock: ObjectBlock = {
     for (let k = 0; k < n; k++) {
       const R = Number(p.radius) + k * Number(p.spacing);
       const gaps: Gap[] = [];
-      const metaGaps: { at: number; len: number }[] = [];
+      const metaGaps: { at: number; len: number; ang?: number }[] = [];
       if (tunnel && ng > 0) {
         // Nearly aligned gaps with a wandering offset; every so often a ring turns its back on the tunnel.
         const rough = Number(p.roughness);
@@ -135,7 +135,7 @@ export const ringBlock: ObjectBlock = {
         for (let j = 0; j < ng; j++) {
           const at = base + (j * dmath.TAU) / ng;
           gaps.push({ at, width: wdt });
-          metaGaps.push({ at, len: wdt * R });
+          metaGaps.push({ at, len: wdt * R, ang: wdt });
         }
       }
       let rate = Number(p.spin) * D2R;
@@ -264,7 +264,7 @@ export const track: ObjectBlock = {
     const geo = spiralGeometry({ x: Number(p.x) || 0, y: Number(p.y) || 0, inner: Number(p.inner), width: Number(p.width), turns: Number(p.turns), chuteLength: Number(p.chuteLength) });
     const ht = Number(p.thickness) / 2;
     const pts: number[] = [];
-    for (let t = 0; t <= geo.T + 1e-9; t += 0.06) {
+    for (let t = 0; t <= geo.T + 1e-9; t += 0.02) {
       const q = geo.at(t);
       pts.push(q.x, q.y);
     }

@@ -2,7 +2,7 @@ import './ui/styles.css';
 import { mountGallery, MODE_COLOR } from './ui/gallery';
 import { mountViewer } from './ui/viewer';
 import { mountEditor } from './ui/editor/editor';
-import { blankSim, fromCode, randomOf } from './sim/modes';
+import { blankSim, fromCode, randomOf, MODES } from './sim/modes';
 import { getSim, decodeShare, saveSim, newId } from './ui/store';
 import { navigate } from './ui/router';
 import { toast } from './ui/dom';
@@ -22,6 +22,14 @@ async function route() {
   const parts = location.hash.replace(/^#\/?/, '').split('/');
   const [kind, arg = ''] = parts;
   try {
+    if (kind === 'r') {
+      // A fresh random sim of a mode: #/r/<mode>[/<variant number>]
+      const mode = MODES.find((m) => m.id === arg);
+      if (!mode) return navigate('#/');
+      const v = parts[2] ? Math.max(0, Math.min(mode.variants.length - 1, Number(parts[2]) - 1)) : undefined;
+      history.replaceState(null, '', `#/g/${randomOf(mode, v).code}`);
+      return route();
+    }
     if (kind === 'g') {
       const gen = fromCode(arg);
       if (!gen) { toast('That code doesn’t match anything'); return navigate('#/'); }

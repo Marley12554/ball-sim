@@ -4,13 +4,18 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "flags": "node scripts/copy-flags.mjs",
+    "predev": "node scripts/copy-flags.mjs",
     "dev": "vite games/ball-sim",
+    "prebuild": "node scripts/copy-flags.mjs",
     "build": "tsc --noEmit && vite build games/ball-sim",
+    "preview": "vite preview games/ball-sim",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "flag-icons": "^7.2.3",
     "typescript": "5.6.3",
     "vite": "5.4.11",
     "vitest": "2.1.8"

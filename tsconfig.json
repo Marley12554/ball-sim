@@ -8,6 +8,7 @@
     "noUncheckedIndexedAccess": false,
     "noImplicitOverride": true,
     "isolatedModules": true,
+    "resolveJsonModule": true,
     "skipLibCheck": true,
     "baseUrl": ".",
     "paths": { "@engine/*": ["engine/src/*"] }

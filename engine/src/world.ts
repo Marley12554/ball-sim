@@ -16,6 +16,10 @@ export interface WorldConfig {
   dt: number;
   gravityX: number;
   gravityY: number;
+  /** 'linear' pulls along (gravityX, gravityY). 'point' pulls toward (gravityCx, gravityCy) with |gravity| strength. */
+  gravityMode: 'linear' | 'point';
+  gravityCx: number;
+  gravityCy: number;
   /** Spatial grid cell size in world units. Roughly 2x a typical ball radius. */
   cellSize: number;
   /** Hard speed clamp, units/s. Keeps substep counts bounded. */
@@ -35,6 +39,9 @@ export const DEFAULT_CONFIG: WorldConfig = {
   dt: 1 / 120,
   gravityX: 0,
   gravityY: 0,
+  gravityMode: 'linear',
+  gravityCx: 0,
+  gravityCy: 0,
   cellSize: 24,
   maxSpeed: 6000,
   maxSubsteps: 32,
@@ -84,6 +91,8 @@ export interface ColliderDef {
   y?: number;
   angle?: number;
   angularVelocity?: number;
+  /** Set when the collider's rotation will change later (motion). Keeps rotation free of grid rebuilds. */
+  rotates?: boolean;
   vx?: number;
   vy?: number;
   restitution?: number;
@@ -139,6 +148,9 @@ export class World {
   stepCount = 0;
   gravityX: number;
   gravityY: number;
+  gravityMode: 'linear' | 'point';
+  gravityCx: number;
+  gravityCy: number;
 
   /* Bodies (SoA, indexed 0..highWater-1, check alive[]) */
   readonly cap: number;
@@ -172,6 +184,7 @@ export class World {
   colCos: number[] = [];
   colSin: number[] = [];
   colW: number[] = [];
+  colRotates: boolean[] = [];
   colVx: number[] = [];
   colVy: number[] = [];
   colRest: number[] = [];
@@ -239,6 +252,9 @@ export class World {
     this.cfg = cfg;
     this.gravityX = cfg.gravityX;
     this.gravityY = cfg.gravityY;
+    this.gravityMode = cfg.gravityMode;
+    this.gravityCx = cfg.gravityCx;
+    this.gravityCy = cfg.gravityCy;
 
     const n = (this.cap = cfg.capacity);
     this.x = new Float64Array(n);
@@ -370,6 +386,7 @@ export class World {
     this.colCos.push(cos(angle));
     this.colSin.push(sin(angle));
     this.colW.push(d.angularVelocity ?? 0);
+    this.colRotates.push(!!d.rotates || (d.angularVelocity ?? 0) !== 0);
     this.colVx.push(d.vx ?? 0);
     this.colVy.push(d.vy ?? 0);
     this.colRest.push(d.restitution ?? 1);
@@ -444,8 +461,12 @@ export class World {
   setColliderVelocity(id: number, vx: number, vy: number, angularVelocity: number): void {
     this.colVx[id] = vx;
     this.colVy[id] = vy;
+    if (angularVelocity !== 0 && !this.colRotates[id]) {
+      this.colRotates[id] = true;
+      this.staticDirty = true;
+    }
+    if (vx !== 0 || vy !== 0) this.staticDirty = true;
     this.colW[id] = angularVelocity;
-    this.staticDirty = true;
   }
 
   /** World position of a collider-local point. */
@@ -464,7 +485,7 @@ export class World {
       const col = this.pCol[p];
       const ht = this.pHt[p];
       if (ht < minHt) minHt = ht;
-      if (this.colW[col] !== 0) {
+      if (this.colRotates[col]) {
         // Rotating: register the rotation-invariant bound so rotation never forces a rebuild.
         const b = this.colBound[col];
         g.add(p, this.colX[col] - b, this.colY[col] - b, this.colX[col] + b, this.colY[col] + b);
@@ -669,10 +690,17 @@ export class World {
   private integrate(dt: number): void {
     const cfg = this.cfg;
     const max = cfg.maxSpeed, max2 = max * max;
-    const gx = this.gravityX, gy = this.gravityY;
+    let gx = this.gravityX, gy = this.gravityY;
+    const radial = this.gravityMode === 'point';
+    const gStrength = radial ? sqrt(gx * gx + gy * gy) : 0;
     const hasStatic = this.staticGrid.entryCount > 0;
     for (let i = 0; i < this.highWater; i++) {
       if (!this.alive[i]) continue;
+      if (radial) {
+        const dx = this.gravityCx - this.x[i], dy = this.gravityCy - this.y[i];
+        const d = sqrt(dx * dx + dy * dy);
+        if (d > 1e-9) { gx = (dx / d) * gStrength; gy = (dy / d) * gStrength; } else { gx = 0; gy = 0; }
+      }
       let vx = this.vx[i] + gx * this.gravityScale[i] * dt;
       let vy = this.vy[i] + gy * this.gravityScale[i] * dt;
       const dmp = this.damping[i];
@@ -710,15 +738,25 @@ export class World {
 
   private reportedCols: number[] = [-1, -1, -1, -1];
 
+  private candP: number[] = [];
+  private candD: number[] = [];
+  private candOrder: number[] = [];
+  private lastDepth = 0;
+
+  /**
+   * Resolves body i against every overlapping wall piece, deepest first.
+   * Deepest-first matters at polyline joints: the face of one segment is always
+   * deeper than the shared endpoint cap of its neighbor, and resolving the face
+   * first removes the cap contact, so fast balls don't get skewed normals.
+   */
   private resolveStatic(i: number): void {
     const g = this.staticGrid;
     const r = this.r[i];
     const x0 = g.cellOf(this.x[i] - r), x1 = g.cellOf(this.x[i] + r);
     const y0 = g.cellOf(this.y[i] - r), y1 = g.cellOf(this.y[i] + r);
     const stamp = ++this.stamp;
-    const rep = this.reportedCols;
-    rep[0] = rep[1] = rep[2] = rep[3] = -1;
-    let nRep = 0;
+    const P = this.candP, Dp = this.candD;
+    let n = 0;
     for (let cy = y0; cy <= y1; cy++) {
       for (let cx = x0; cx <= x1; cx++) {
         const hi = g.bucketHi(cx, cy);
@@ -727,15 +765,27 @@ export class World {
           const p = g.entryItem[e];
           if (this.pStamp[p] === stamp) continue;
           this.pStamp[p] = stamp;
-          const col = this.collidePiece(i, p);
-          if (col >= 0) {
-            let seen = false;
-            for (let k = 0; k < nRep; k++) if (rep[k] === col) seen = true;
-            if (!seen) {
-              if (nRep < 4) rep[nRep++] = col;
-              this.pushContact(CONTACT_WALL, i, col, p, this.hitPx, this.hitPy, this.hitNx, this.hitNy, this.hitSpeed);
-            }
-          }
+          if (this.collidePiece(i, p, true) >= 0) { P[n] = p; Dp[n] = this.lastDepth; n++; }
+        }
+      }
+    }
+    if (n === 0) return;
+    const rep = this.reportedCols;
+    rep[0] = rep[1] = rep[2] = rep[3] = -1;
+    let nRep = 0;
+    const order = this.candOrder;
+    order.length = n;
+    for (let k = 0; k < n; k++) order[k] = k;
+    if (n > 1) order.sort((a, b) => Dp[b] - Dp[a] || P[a] - P[b]);
+    for (let k = 0; k < n; k++) {
+      const p = P[order[k]];
+      const col = this.collidePiece(i, p, false);
+      if (col >= 0) {
+        let seen = false;
+        for (let q = 0; q < nRep; q++) if (rep[q] === col) seen = true;
+        if (!seen) {
+          if (nRep < 4) rep[nRep++] = col;
+          this.pushContact(CONTACT_WALL, i, col, p, this.hitPx, this.hitPy, this.hitNx, this.hitNy, this.hitSpeed);
         }
       }
     }
@@ -743,8 +793,11 @@ export class World {
 
   private hitPx = 0; private hitPy = 0; private hitNx = 0; private hitNy = 0; private hitSpeed = 0;
 
-  /** Resolves body i against piece p. Returns collider id if a reportable impact happened, else -1. */
-  private collidePiece(i: number, p: number): number {
+  /**
+   * Resolves body i against piece p. Returns collider id if a reportable impact happened, else -1.
+   * With `measure`, only tests overlap: returns 1 and sets lastDepth, or -1.
+   */
+  private collidePiece(i: number, p: number, measure: boolean): number {
     const col = this.pCol[p];
     if (!(this.layer[i] & this.colMask[col]) || !(this.colLayer[col] & this.mask[i])) return -1;
     const c = this.colCos[col], s = this.colSin[col];
@@ -793,6 +846,7 @@ export class World {
     const d2 = ex * ex + ey * ey;
     if (d2 >= R * R) return -1;
     const d = sqrt(d2);
+    if (measure) { this.lastDepth = R - d; return 1; }
     let nlx: number, nly: number;
     if (d > 1e-12) { nlx = ex / d; nly = ey / d; } else { nlx = fnx; nly = fny; }
     const pen = R - d;

@@ -2,7 +2,7 @@
 
 Deterministic 2D physics for many circles against walls, rings with gaps and tracks. Shared by `/games/ball-sim` and later `/games/shooter`. No rendering and no game rules in here.
 
-Status: physics core (step 1). The rule system (objects, triggers, actions) lands next and will be documented here.
+Two parts: the physics world (`world.ts` and friends) and a generic rule graph (`rules.ts`). Game-specific blocks live in the game, not here.
 
 ## Determinism rules
 
@@ -34,6 +34,7 @@ world.step();
 | `contactCapacity` | 20000 | contacts reported per step. Extras still resolve, just unreported |
 | `dt` | 1/120 | fixed step, seconds |
 | `gravityX/Y` | 0 | world gravity (also mutable as `world.gravityX/Y`) |
+| `gravityMode` | `'linear'` | `'point'` pulls toward `gravityCx/Cy` with strength `|(gravityX, gravityY)|` |
 | `cellSize` | 24 | grid cell size, about 2x a typical ball radius |
 | `maxSpeed` | 6000 | hard speed clamp, bounds substep cost |
 | `maxSubsteps` | 32 | per body per step against walls |
@@ -64,7 +65,7 @@ Pieces are thick lines with round caps, so gap edges in a ring behave like round
 - `setColliderTransform(id, x, y, angle)`, `setColliderVelocity(id, vx, vy, w)`
 - `colliderToWorld(id, lx, ly, out)`
 
-Rotation costs nothing extra. Translation rebuilds the static grid that step.
+Rotation costs nothing extra if the collider was created with `angularVelocity` or `rotates: true` (it's registered with a rotation-proof bound). Translation rebuilds the static grid that step. To drive motion (swing, slide), set velocities each step with `setColliderVelocity` so the world integrates to the target pose.
 
 ### Tethers
 
@@ -100,7 +101,7 @@ Body-body contacts only report on approach, so resting contact doesn't spam. Tet
 1. Advance kinematic colliders.
 2. Rebuild the static grid if colliders moved or changed.
 3. Apply tether springs and rope limits.
-4. Integrate bodies (gravity, damping, speed clamp), substepping each body against walls so it never moves more than half its contact radius per substep. This is what stops fast balls passing through walls.
+4. Integrate bodies (gravity, damping, speed clamp), substepping each body against walls so it never moves more than half its contact radius per substep. This is what stops fast balls passing through walls. Within a substep, overlapping wall pieces resolve deepest first, so polyline joints don't produce skewed corner normals.
 5. Body-body pass via the spatial hash. Each overlapping pair is handled once, in the first cell both cover.
 6. Tether touch detection.
 
@@ -126,7 +127,28 @@ Runs as many fixed steps as real time times `speed` calls for, but never more th
 | substep cap | integrate | `stats.substepCapHits++`. Raise `maxSubsteps` or lower `maxSpeed` |
 | speed clamp | integrate | velocity scaled to `maxSpeed` |
 | frame budget | `Runner` | slowdown instead of freezing |
-| trigger firings per frame | rule system | coming in step 2 |
+| trigger firings per step | `Dispatcher` | `maxFiringsPerStep` (default 4000). Excess dropped in fixed order, `stats.firingsDropped++` |
+
+## Rule graph (`rules.ts`)
+
+Generic objects → triggers → filters → actions graphs with typed connections. No ball-specific code.
+
+**Context bits** describe what an event knows: `CTX_SELF`, `CTX_OTHER`, `CTX_POINT`, `CTX_TETHER`. A trigger *provides* a mask. Filters and actions *need* a mask. A wire is valid when `need ⊆ provided`. Filters pass through the intersection of their inputs.
+
+**Blocks** (`BlockSpec`): `type`, `category` (`object | trigger | filter | action`), `label`, `params: ParamSpec[]`, plus:
+- objects: `kind`, `output` (can wire into triggers)
+- triggers: `objectInput` (`none | optional | required`), `provides(params, hasObject)`
+- filters/actions: `needs(params)`, or per-option `needs` on enum params (e.g. target "other" needs `CTX_OTHER`)
+- `summary(params, nameOf)` for node faces
+
+`Registry.add(spec)` appends `cooldown` and `maxFires` params to every trigger.
+
+**Graph** (`GraphDef`): `nodes: {id, type, x, y, params}[]`, `wires: {from, to}[]`.
+- `analyzeGraph(g, reg)` returns provided/needed masks, per-wire errors (`kind`, `shape`, `needs objects`, `loop`), valid children and each trigger's object inputs.
+- `canConnect(g, reg, from, to)` for editors: rejects duplicates, cycles and shape mismatches.
+- `compileGraph(g, reg)` returns `CompiledTrigger[]` trees with defaults filled in.
+
+**Dispatch**: `new Dispatcher<E>({ test, run }, maxFiringsPerStep)`. The game detects events and calls `dispatcher.fire(trigger, key, time, event)`, where `key` identifies the object for per-object cooldowns and max fires (-1 for sim-wide). Call `beginStep()` each step. Filters' `test` gates, actions' `run` act. To stay deterministic, actions should queue structural changes (spawn/destroy) and apply them after the step's events.
 
 ## Spatial hash
 

@@ -17,7 +17,7 @@ Block design rules:
 - Blocks that can't work together physically don't connect. Connector shapes encode what an event knows (self, other, point), and an action's connector only fits triggers that provide what it needs. Combos that are legal but cancel out get a warning, not a block.
 - Adding a new block should mean adding one file to a registry. More rules will be added over time.
 
-Draft block list: `docs/RULES.md`.
+Block reference: `docs/RULES.md`.
 
 ## Required examples
 
@@ -59,12 +59,12 @@ Dark, clean, modern, refined. Techno, but not neon or noisy. Shares a general th
 ## Build order
 
 1. Physics core. **Done.**
-2. Rule system: block registry, typed connectors, cooldowns, guards.
-3. Ring escape preset from blocks only.
-4. Spiral drop, doubling jaw, tether battle presets. Refactor blocks as needed.
-5. Editor UI (phone-usable), save/load JSON.
-6. Arena mode: HP, abilities as blocks with cooldowns, non-rotating squares.
-7. Later: sharing (JSON or code), recording clips.
+2. Rule system: block registry, typed connectors, cooldowns, guards. **Done.**
+3. Ring escape preset from blocks only. **Done.**
+4. Spiral drop, doubling jaw, tether battle presets. **Done.**
+5. Editor UI (phone-usable), save/load JSON. **Done** (autosave to the browser, export/import files).
+6. Arena mode: HP, abilities as blocks with cooldowns. **Done.** Non-rotating squares are not built yet: all bodies are circles.
+7. Sharing (link with the sim compressed into it) and recording clips (WebM/MP4). **Done.**
 
 ## Future: gate shooter
 

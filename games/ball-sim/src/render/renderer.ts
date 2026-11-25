@@ -6,6 +6,8 @@ export interface DrawOptions {
   hud?: boolean;
   /** Extra zoom factor on top of the fitted camera. */
   zoom?: number;
+  /** Push the HUD down by this many CSS pixels (room for page chrome). */
+  hudTop?: number;
 }
 
 const GROUND = '#0A0B0D';
@@ -157,16 +159,16 @@ export class Renderer {
       }
     }
 
-    if (opts.hud) this.drawHud(sim, W, H);
+    if (opts.hud) this.drawHud(sim, W, H, (opts.hudTop ?? 0) * (W / Math.max(1, this.canvas.clientWidth)));
   }
 
-  private drawHud(sim: Sim, W: number, H: number): void {
+  private drawHud(sim: Sim, W: number, H: number, top: number): void {
     const g = this.ctx;
     const u = Math.min(W, H) / 100; // 1% of the short side
     g.setTransform(1, 0, 0, 1, 0, 0);
     const pad = Math.max(16, u * 3);
     const s = sim.def.settings;
-    let y = pad;
+    let y = pad + top;
     g.textBaseline = 'top';
     g.textAlign = 'left';
     if (s.clock !== 'none') {

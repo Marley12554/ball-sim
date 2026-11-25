@@ -1,78 +1,80 @@
-# Block list (draft for review)
+# Blocks
 
-## Connector shapes
+## Connectors
 
-An event carries some of three things: **self** (the object the rule is on), **other** (the second object involved) and **point** (where it happened). The connector shape shows which. An action fits a trigger only if the trigger provides everything the action needs. Filters pass the shape through unchanged.
+An event carries some of: **self**, **other**, **point**, **tether**. A trigger's output connector shows what it gives, and an action or filter's input connector shows what it needs. A wire only connects when the source gives everything the target needs. Options inside a block that need more than the wire gives are disabled.
+
+| shape | gives / needs |
+|---|---|
+| circle | nothing |
+| square | self |
+| diamond | self + point |
+| triangle | self + other + point |
+| star | self + other + point + tether |
+
+Object blocks wire into triggers through the round object port.
 
 ## Objects
 
 | block | notes |
 |---|---|
-| Ball | radius, mass, bounciness, gravity scale, look, group |
-| Ring | radius, thickness, gaps (position, width), rotation speed |
-| Track | spiral or freeform path, thickness |
-| Wall | line or box outline |
-| Zone | invisible area (circle or box) that only detects |
-| Counter | a named number for the whole sim |
-
-Every object belongs to a group. Rules attach to groups, so "all red balls" is one rule, not fifty.
+| Balls | count, look, size, density, bounciness, drag, gravity scale, HP, hit other balls, placement (point, scatter, circle, line, grid), launch direction and speed |
+| Rings | count, radius, spacing, thickness, gaps (count, width, placement), spin and spin pattern, color |
+| Wall | box, line or arc, with motion (still, spin, swing, slide) |
+| Spiral | inner radius, spacing, turns, spin |
+| Zone | circle or box area that only detects |
+| Counter | named number, optionally shown on screen |
 
 ## Triggers
 
-| block | provides | params |
+Every trigger also has **Cooldown** (per object) and **Max fires** (per object, 0 = no limit).
+
+| block | gives | params |
 |---|---|---|
-| Start | none | |
-| Every | self (or none) | interval |
-| After | none | time |
-| Bounce | self, other (wall), point | min impact speed |
-| Touch | self, other (ball), point | which group |
-| Cross tether | self, other (tether owner), point | |
-| Lose tether | self | |
-| Leave | self, other (ring or zone), point | |
-| Enter | self, other (zone), point | |
-| Value reaches | self | property (speed, size, HP, tether count...), above/below, threshold |
-| Counter reaches | none | counter, above/below, threshold |
-| Group count reaches | none | group, above/below, threshold |
-| Spawned | self | |
-| Destroyed | self, point | |
+| Start | nothing | |
+| Every | self + point with objects, else nothing | interval |
+| After | self + point with objects, else nothing | time |
+| Bounce | self, other (wall), point | which wall |
+| Touch | self, other (ball), point | with which balls |
+| Cross tether | + tether | |
+| Lose tether | self + point | |
+| Leave | self, other (ring or zone), point | which ring or zone |
+| Enter | self, other (ring or zone), point | which ring or zone |
+| Value reaches | self + point | speed, size, HP, tethers, age; above/below |
+| Counter reaches | nothing | counter, above/below |
+| Count reaches | self + point (first remaining member) | group, at most/at least |
+| Spawned | self + point | |
+| Destroyed | self + point | |
 
 ## Filters
 
 | block | params |
 |---|---|
 | Chance | percent |
-| Only if | property compare on self or other |
-| Only if other is | same group / different group / specific group |
-| Every Nth time | N |
-
-Every rule also has cooldown and max fires as settings, not separate blocks.
+| Only if | self/other value (or impact speed) above/below |
+| Only if other | other group / same group / in / not in |
+| Every Nth | N |
 
 ## Actions
 
-| block | needs | params |
-|---|---|---|
-| Change property | self or other | property, add/multiply/set, amount, min/max clamp |
-| Push | self or other | direction (along hit normal, away from point, toward point, random, fixed), strength |
-| Explode | point | radius, strength, falloff |
-| Duplicate | self or other | count, spread, keep velocity |
-| Spawn | point or self (or random in zone) | object template, count |
-| Destroy | self or other | |
-| Attach tether | self, plus point or other | stiffness, rest length, max length |
-| Cut tether | self, or other (crossed tether) | which: crossed / oldest / all |
-| Change group | self or other | group |
-| Change look | self or other | look or look preset |
-| Change rotation | other (ring) | add/multiply/set |
-| Counter | none | counter, add/set, amount |
-| Set gravity | none | direction, strength |
-| End simulation | none | outcome label |
+Most actions take a target: **self**, **other** or **a whole group**.
 
-## Presets as blocks
+| block | params |
+|---|---|
+| Change | property (speed, size, HP, bounciness, mass, gravity, drag, spin), add/multiply/set, amount, optional limit. Target can also be *future spawns* of a group |
+| Push | forward, away from / toward the hit, to center, random, angle; strength |
+| Explode | at the event point, center or a position; radius, strength |
+| Duplicate | copies, spread |
+| Spawn | group, count, at its placement / self / event point / center |
+| Destroy | target |
+| Attach tether | to the hit point (sticks to the wall), other ball or center; pull, damping, rest length, max length, max per ball |
+| Cut tether | the crossed one, oldest, newest or all |
+| Move to group | target, group |
+| Change look | target, look or look preset |
+| Counter | add/multiply/set |
+| Set gravity | direction or to center, strength |
+| End | outcome label. `{self}` and `{time}` are filled in |
 
-- **Ring escape**: Ball · Bounce → Change property (speed, x1.05). Ball · Leave (ring) → Destroy other. After 60s → End "Time up". Group count reaches 0 (rings) → End "Escaped".
-- **Tether battle**: Ball · Bounce → Attach tether (point). Ball · Cross tether → Only if other is (different group) → Cut tether (crossed). Ball · Value reaches (tether count below 1) → Destroy self. Group count reaches 1 (balls) → End "Last ball".
-- **Doubling jaw**: Ball · Touch (jaw) → Duplicate self. Group count reaches 2000 → Destroy (ring) + Explode.
-- **Spiral drop**: Ball · Value reaches (speed below X) → Destroy self + Spawn (launch point) + Counter. Ball · Enter (center zone) → End.
+## Presets
 
-## Open question
-
-The jaw needs moving walls. A "Motion" setting on rings and walls (rotate, oscillate, open/close) covers it without a new trigger or action.
+All built from the blocks above, with no special code: Ring Escape, Tether Battle, Doubling Jaw, Spiral Drop, Arena, Growth, Split.

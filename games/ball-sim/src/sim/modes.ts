@@ -93,28 +93,31 @@ function ringEscape(v: number, seed: number): SimDef {
  * passes turn to powder, the tunnel wall knocks it back, and the remaining
  * rings snap back in around it. No gravity, steady speed.
  */
+export const GAUNTLET = { spin: 62, push: 150, jitter: 150, gap: 38, speed: 340 };
 function ringGauntlet(v: number, seed: number, r: Rng, g: G): SimDef {
   const count = v === 2 ? 10000 : 1000;
   const rings = g.n('ring', {
-    name: 'Rings', count, radius: 84, spacing: 9, thickness: 3, gaps: 1, gapPlacement: 'aligned', gapWidth: 24,
-    gapAngle: r.int(360), spin: (88 + r.int(25)) * (r.chance(0.5) ? 1 : -1), spinPattern: 'same',
+    name: 'Rings', count, radius: 84, spacing: 9, thickness: 3, gaps: 1, gapPlacement: 'aligned', gapWidth: GAUNTLET.gap,
+    gapAngle: r.int(360), spin: (GAUNTLET.spin + r.int(12)) * (r.chance(0.5) ? 1 : -1), spinPattern: 'same',
     snapBack: true, palette: vivid(r), paletteCycle: 45,
   }, C[0], 220);
-  const ball = g.n('ball', { name: 'Ball', count: 1, radius: 6, speed: 340, direction: 'random', gravity: 0, look: { mode: 'fixed', look: { t: 'gradient', c: ['#FFFFFF', '#E0F2FE'], kind: 'radial', angle: 0 } } }, C[0], 40);
+  const ball = g.n('ball', { name: 'Ball', count: 1, radius: 6, speed: GAUNTLET.speed, direction: 'random', gravity: 0, look: { mode: 'fixed', look: { t: 'gradient', c: ['#FFFFFF', '#E0F2FE'], kind: 'radial', angle: 0 } } }, C[0], 40);
   g.n('counter', { name: 'Rings', source: 'count', group: rings, show: true, place: 'center' }, C[0], 380);
   const bounce = g.n('bounce', { wall: '' }, C[1], 40);
   // A nudge toward the middle on every bounce keeps the ball from skimming around the wall forever.
-  const inward = g.n('push', { target: 'self', direction: 'center', strength: 150 }, C[2], 0);
-  const steady = g.n('setProp', { target: 'self', prop: 'speed', op: 'set', amount: 340 }, C[2], 70);
+  // Strong enough that the ball always leaves the wall at a real angle (a round wall otherwise keeps a shallow angle forever).
+  const inward = g.n('push', { target: 'self', direction: 'center', strength: GAUNTLET.push }, C[2], 0);
+  const jitter = g.n('push', { target: 'self', direction: 'random', strength: GAUNTLET.jitter }, C[2], 70);
+  const steady = g.n('setProp', { target: 'self', prop: 'speed', op: 'set', amount: GAUNTLET.speed }, C[2], 140);
   const leave = g.n('leave', { container: rings }, C[1], 160);
   const breakRing = g.n('destroy', { target: 'other' }, C[2], 160);
   const done = g.n('groupCount', { group: rings, cmp: 'atMost', value: 0 }, C[1], 280);
   const escaped = g.n('end', { label: `Escaped all ${count.toLocaleString('en-US')} rings in {time}` }, C[2], 280);
   g.w(ball, bounce, leave);
-  g.w(bounce, inward, steady);
+  g.w(bounce, inward, jitter, steady);
   g.w(leave, breakRing);
   g.w(done, escaped);
-  return def(v === 2 ? 'Ring Gauntlet 10K' : 'Ring Gauntlet', seed, g, { gravity: 0, clock: 'up', view: 330, maxObjects: 16, speedLimit: 2000 });
+  return def(v === 2 ? 'Ring Gauntlet 10K' : 'Ring Gauntlet', seed, g, { gravity: 0, clock: 'up', view: 330, camera: 'zoom', maxObjects: 16, speedLimit: 2000, restThreshold: 0, impactThreshold: 0 });
 }
 
 /* ------------------------------------ Leak ------------------------------------- */

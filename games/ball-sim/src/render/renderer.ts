@@ -58,6 +58,7 @@ export class Renderer {
   private tmp = { x: 0, y: 0 };
   private seg = [0, 0, 0, 0];
   private scale = 1;
+  private baseViewR = 1;
 
   constructor(readonly canvas: HTMLCanvasElement) {
     this.ctx = canvas.getContext('2d', { alpha: false })!;
@@ -71,7 +72,7 @@ export class Renderer {
   fit(sim: Sim): void {
     this.sim = sim;
     const v = sim.def.settings.view;
-    this.viewR = v > 0 ? v : sim.contentRadius() * 1.04 + 10;
+    this.viewR = this.baseViewR = v > 0 ? v : sim.contentRadius() * 1.04 + 10;
     this.camX = 0; this.camY = 0; this.camVX = 0; this.camVY = 0;
     if (sim.settings.camera === 'follow' && sim.focus(this.tmp)) { this.camX = this.tmp.x; this.camY = this.tmp.y; }
     this.particles = []; this.lights = []; this.rings = []; this.floaters = [];
@@ -245,6 +246,13 @@ export class Renderer {
       this.camVY += ((ty - this.camY) * k - this.camVY * c) * dt;
       this.camX += this.camVX * dt;
       this.camY += this.camVY * dt;
+    }
+    if (sim.settings.camera === 'zoom' && sim.focus(this.tmp)) {
+      // Pull back quickly when the ball heads off screen, settle back in slowly.
+      const base = this.baseViewR;
+      const target = Math.max(base, Math.hypot(this.tmp.x, this.tmp.y) + base * 0.22);
+      const k = target > this.viewR ? 5 : 0.9;
+      this.viewR += (target - this.viewR) * Math.min(1, k * Math.min(0.05, realDt));
     }
     this.shake = Math.max(0, this.shake - realDt * 2.5);
     const sh = this.shake * this.shake * this.viewR * 0.02;

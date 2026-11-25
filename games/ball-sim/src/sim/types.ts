@@ -33,12 +33,14 @@ export interface SimSettings {
   endHold: number;
   /** Seconds everything holds still in its starting pose before the sim begins. */
   startDelay: number;
-  /** 'fit' frames everything. 'follow' trails the first ball with a lazy camera. */
-  camera: 'fit' | 'follow';
+  /** 'fit' frames everything. 'follow' trails the first ball with a lazy camera. 'zoom' stays centered and pulls back to keep the first ball in view. */
+  camera: 'fit' | 'follow' | 'zoom';
   /** Fraction of ball overlap pushed apart per step (1 = hard, lower lets crowds compress). */
   pairCorrection: number;
   /** Impacts slower than this don't bounce, so piles settle. */
   restThreshold: number;
+  /** Wall hits slower than this (px/s along the normal) don't count as bounces. */
+  impactThreshold: number;
 }
 
 export interface SimDef {
@@ -65,6 +67,7 @@ export const DEFAULT_SETTINGS: SimSettings = {
   camera: 'fit',
   pairCorrection: 1,
   restThreshold: 30,
+  impactThreshold: 6,
 };
 
 /** Things that happened this step, for the renderer and audio. Not part of the simulation state. */

@@ -196,7 +196,7 @@ export class Sim {
       maxSpeed: s.speedLimit,
       cellSize: 28,
       maxSubsteps: 48,
-      minImpactSpeed: 6,
+      minImpactSpeed: s.impactThreshold ?? 6,
       pairCorrection: s.pairCorrection,
       restThreshold: s.restThreshold,
     });
@@ -889,7 +889,9 @@ export class Sim {
         // A ring the ball is already crossing is left alone (it is about to break).
         if (ballD >= 0 && prev < ballD + ballR + ht) continue;
         const target = a.from[k] + (a.to[k] - a.from[k]) * e;
-        const floor = ballD >= 0 ? ballD + ballR + ht + 1 + j * sb.spacing : 0;
+        // Stay well clear of the ball so the closing ring never looks glued to it.
+        const clear = Math.max(sb.spacing * 3, ballR * 4);
+        const floor = ballD >= 0 ? ballD + ballR + ht + clear + j * sb.spacing : 0;
         const R = Math.min(prev, Math.max(target, floor));
         j++;
         const growth = u >= 1 ? 0 : (R - prev) / this.dt / Math.max(1, R);
@@ -911,12 +913,16 @@ export class Sim {
       found = true;
       break;
     }
-    if (!found || vr >= 0) return;
+    // Closing rings keep their distance from the ball, so this is safe in either direction.
+    if (!found) return;
+    void vr;
     // Only once the ball is clearly back inside the innermost ring.
     {
       let d = 0;
       for (let i = 0; i < w.highWater; i++) if (this.inPlay(i)) { d = dmath.sqrt((w.x[i] - cx) ** 2 + (w.y[i] - cy) ** 2) + w.r[i]; break; }
-      if (d > w.colRingR[inner] - sb.spacing) return;
+      let r = 0;
+      for (let i = 0; i < w.highWater; i++) if (this.inPlay(i)) { r = w.r[i]; break; }
+      if (d > w.colRingR[inner] - Math.max(sb.spacing * 3, r * 4) - sb.spacing) return;
     }
     const cols: number[] = [], from: number[] = [], to: number[] = [];
     let j = 0;
@@ -930,7 +936,7 @@ export class Sim {
     }
     // Fast, but never so fast that a ring could jump past the ball in one step.
     const hole = from[0] - to[0];
-    sb.anim = { t0: this.time, dur: Math.max(0.28, hole / 520), cols, from, to };
+    sb.anim = { t0: this.time, dur: Math.max(0.4, hole / 420), cols, from, to };
   }
 
   /** Recompute a ring's arc pieces for radius R with fixed-length gaps. */

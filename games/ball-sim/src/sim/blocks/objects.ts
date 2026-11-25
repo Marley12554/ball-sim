@@ -93,9 +93,7 @@ export const ringBlock: ObjectBlock = {
       key: 'spinPattern', label: 'Spin pattern', type: 'enum', default: 'alternate', showIf: (p) => p.count > 1,
       options: [{ value: 'same', label: 'Same' }, { value: 'alternate', label: 'Alternate' }, { value: 'faster', label: 'Faster out' }],
     },
-    { key: 'closeIn', label: 'Close in', type: 'bool', default: false },
-    { key: 'closeDelay', label: 'Close after', type: 'number', default: 2.5, min: 0, max: 120, step: 0.1, unit: 's', showIf: (p) => p.closeIn },
-    { key: 'closeRate', label: 'Close speed', type: 'number', default: 0.35, min: 0.01, max: 5, step: 0.01, showIf: (p) => p.closeIn },
+    { key: 'snapBack', label: 'Close the hole', type: 'bool', default: false, showIf: (p) => p.count > 1 },
     bounce,
     palette('aurora'),
     { key: 'paletteCycle', label: 'Color cycle', type: 'int', default: 0, min: 0, max: 10000, step: 1, showIf: (p) => p.palette !== 'single' && p.count > 1 },
@@ -144,7 +142,7 @@ export const ringBlock: ObjectBlock = {
       if (p.spinPattern === 'alternate' && k % 2 === 1) rate = -rate;
       if (p.spinPattern === 'faster') rate *= 1 + k * 0.2;
       const cyc = Number(p.paletteCycle) > 0 ? Number(p.paletteCycle) : n;
-      const tcol = cyc <= 1 ? 0 : p.paletteCycle > 0 ? Math.abs(((k / cyc) % 2) - 1) : k / Math.max(1, n - 1);
+      const tcol = n <= 1 ? 0 : p.paletteCycle > 0 ? Math.abs(((k / cyc) % 2) - 1) : k / Math.max(1, n - 1);
       const col = p.palette === 'single' ? p.color : samplePalette(p.palette, p.paletteCycle > 0 ? 1 - tcol : tcol);
       const id = sim.addCollider(g, 'ring', {
         x: Number(p.x) || 0, y: Number(p.y) || 0,
@@ -155,7 +153,7 @@ export const ringBlock: ObjectBlock = {
       if (n === 1 && p.palette !== 'single') sim.colGrad[id] = PALETTES[p.palette];
       order.push(id);
     }
-    if (p.closeIn) sim.closeIn.push({ group: g.index, delay: Number(p.closeDelay), rate: Number(p.closeRate), cur: -1, since: 0, px: NaN, py: NaN, order, ptr: 0 });
+    if (p.snapBack && n > 1) sim.snapBack.push({ group: g.index, order, ptr: 0, R0: Number(p.radius), spacing: Number(p.spacing), anim: null });
   },
 };
 
@@ -314,6 +312,7 @@ export const counter: ObjectBlock = {
     { key: 'initial', label: 'Start at', type: 'number', default: 0, min: -1e9, max: 1e9, step: 1, showIf: (p) => p.source !== 'count' },
     { key: 'group', label: 'Of', type: 'ref', refKinds: ['ball', 'ring', 'wall', 'zone'], default: '', showIf: (p) => p.source === 'count' },
     { key: 'show', label: 'Show', type: 'bool', default: true },
+    { key: 'place', label: 'Where', type: 'enum', default: 'corner', options: [{ value: 'corner', label: 'Corner' }, { value: 'center', label: 'Center' }], showIf: (p) => p.show },
   ],
   summary: (p, n) => (p.source === 'count' ? `count of ${p.group ? n(p.group) : '?'}` : `starts at ${p.initial}`),
 };

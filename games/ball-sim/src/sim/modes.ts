@@ -31,7 +31,7 @@ function def(name: string, seed: number, g: G, settings: Partial<SimSettings>): 
 
 const COLORFUL: LookSetting['mode'] = 'preset';
 const pick = <T,>(r: Rng, a: T[]): T => a[r.int(a.length)];
-const vivid = (r: Rng) => pick(r, PALETTE_NAMES.filter((p) => p !== 'titanium'));
+const vivid = (r: Rng) => pick(r, PALETTE_NAMES.filter((p) => p !== 'titanium' && !p.startsWith('duo')));
 const ballLook = (r: Rng): LookSetting => ({ mode: COLORFUL, preset: pick(r, ['palette', 'gradients', 'patterns', 'spectrum']) as any });
 
 export interface Variant { name: string }
@@ -48,38 +48,56 @@ export interface Mode {
 function ringEscape(v: number, seed: number): SimDef {
   const r = new Rng(seed);
   const g = new G();
-  const gauntlet = v >= 1;
-  const count = v === 2 ? 10000 : v === 1 ? 1000 : 10 + r.int(5);
-  const rings = g.n('ring', gauntlet ? {
-    name: 'Rings', count, radius: 60, spacing: 30, thickness: 4, gaps: 1, gapPlacement: 'tunnel', gapLength: 42, gapAngle: 90,
-    roughness: 7, blockEvery: (v === 2 ? 50 : 26) + r.int(14), spin: 0, closeIn: true, closeDelay: 2.2, closeRate: 0.4, bounciness: 0.7,
-    palette: vivid(r), paletteCycle: 36,
-  } : {
+  if (v >= 1) return ringGauntlet(v, seed, r, g);
+  const count = 10 + r.int(5);
+  const rings = g.n('ring', {
     name: 'Rings', count, radius: 64, spacing: 24, thickness: 5, gaps: 1, gapWidth: 30 + r.int(12), gapPlacement: 'random',
     spin: 40 + r.int(30), spinPattern: r.chance(0.5) ? 'alternate' : 'faster', palette: vivid(r),
   }, C[0], 220);
-  const ball = g.n('ball', { name: 'Ball', count: 1, radius: gauntlet ? 10 : 11, speed: 0, drag: gauntlet ? 0.8 : 0, look: { mode: 'fixed', look: { t: 'gradient', c: ['#FFFFFF', '#FDE68A'], kind: 'radial', angle: 0 } } }, C[0], 40);
-  const left = g.n('counter', { name: 'Rings', source: 'count', group: rings, show: true }, C[0], 380);
+  const ball = g.n('ball', { name: 'Ball', count: 1, radius: 11, speed: 0, look: { mode: 'fixed', look: { t: 'gradient', c: ['#FFFFFF', '#FDE68A'], kind: 'radial', angle: 0 } } }, C[0], 40);
+  g.n('counter', { name: 'Rings', source: 'count', group: rings, show: true }, C[0], 380);
   const bounce = g.n('bounce', { wall: '' }, C[1], 40);
-  const faster = g.n('setProp', { target: 'self', prop: 'speed', op: 'multiply', amount: gauntlet ? 1 : 1.03, clamp: true, min: 0, max: gauntlet ? 1300 : 1500 }, C[2], 40);
+  const faster = g.n('setProp', { target: 'self', prop: 'speed', op: 'multiply', amount: 1.03, clamp: true, min: 0, max: 1500 }, C[2], 40);
   const leave = g.n('leave', { container: rings }, C[1], 160);
   const breakRing = g.n('destroy', { target: 'other' }, C[2], 160);
   const done = g.n('groupCount', { group: rings, cmp: 'atMost', value: 0 }, C[1], 280);
-  const escaped = g.n('end', { label: gauntlet ? `Escaped all ${count.toLocaleString('en-US')} rings in {time}` : 'Escaped in {time}' }, C[2], 280);
+  const escaped = g.n('end', { label: 'Escaped in {time}' }, C[2], 280);
+  const timer = g.n('after', { time: 60 }, C[1], 400);
+  const timeUp = g.n('end', { label: 'Time’s up' }, C[2], 400);
   g.w(ball, bounce, leave);
   g.w(bounce, faster);
   g.w(leave, breakRing);
   g.w(done, escaped);
-  void left;
-  if (!gauntlet) {
-    const timer = g.n('after', { time: 60 }, C[1], 400);
-    const timeUp = g.n('end', { label: 'Time’s up' }, C[2], 400);
-    g.w(timer, timeUp);
-  }
-  const name = ['Ring Escape', 'Ring Gauntlet', 'Ring Gauntlet 10K'][v];
-  return def(name, seed, g, gauntlet
-    ? { gravity: 600, clock: 'up', camera: 'follow', view: 330, maxObjects: 16, speedLimit: 2500 }
-    : { gravity: 520, clock: 'down', clockFrom: 60, maxObjects: 16 });
+  g.w(timer, timeUp);
+  return def('Ring Escape', seed, g, { gravity: 520, clock: 'down', clockFrom: 60, maxObjects: 16 });
+}
+
+/**
+ * Gauntlet: hundreds of thin rings spinning together with their gaps lined up
+ * into one rotating tunnel. The ball breaks out through the tunnel, rings it
+ * passes turn to powder, the tunnel wall knocks it back, and the remaining
+ * rings snap back in around it. No gravity, steady speed.
+ */
+function ringGauntlet(v: number, seed: number, r: Rng, g: G): SimDef {
+  const count = v === 2 ? 10000 : 1000;
+  const rings = g.n('ring', {
+    name: 'Rings', count, radius: 78, spacing: 7, thickness: 2.6, gaps: 1, gapPlacement: 'tunnel', gapLength: 42,
+    gapAngle: r.int(360), roughness: 0, blockEvery: 0, spin: (88 + r.int(25)) * (r.chance(0.5) ? 1 : -1), spinPattern: 'same',
+    snapBack: true, palette: pick(r, ['duo-dusk', 'duo-mint', 'duo-sun', 'duo-ice']), paletteCycle: 1,
+  }, C[0], 220);
+  const ball = g.n('ball', { name: 'Ball', count: 1, radius: 6, speed: 340, direction: 'random', gravity: 0, look: { mode: 'fixed', look: { t: 'gradient', c: ['#FFFFFF', '#E0F2FE'], kind: 'radial', angle: 0 } } }, C[0], 40);
+  g.n('counter', { name: 'Rings', source: 'count', group: rings, show: true, place: 'center' }, C[0], 380);
+  const bounce = g.n('bounce', { wall: '' }, C[1], 40);
+  const steady = g.n('setProp', { target: 'self', prop: 'speed', op: 'set', amount: 340 }, C[2], 40);
+  const leave = g.n('leave', { container: rings }, C[1], 160);
+  const breakRing = g.n('destroy', { target: 'other' }, C[2], 160);
+  const done = g.n('groupCount', { group: rings, cmp: 'atMost', value: 0 }, C[1], 280);
+  const escaped = g.n('end', { label: `Escaped all ${count.toLocaleString('en-US')} rings in {time}` }, C[2], 280);
+  g.w(ball, bounce, leave);
+  g.w(bounce, steady);
+  g.w(leave, breakRing);
+  g.w(done, escaped);
+  return def(v === 2 ? 'Ring Gauntlet 10K' : 'Ring Gauntlet', seed, g, { gravity: 0, clock: 'up', view: 330, maxObjects: 16, speedLimit: 2000 });
 }
 
 /* ------------------------------------ Leak ------------------------------------- */

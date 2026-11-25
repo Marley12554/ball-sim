@@ -58,6 +58,7 @@ export interface CounterInfo {
   show: boolean;
   /** When set, the counter shows the live size of this group instead of a stored value. */
   countGroup: number;
+  place: 'corner' | 'center';
 }
 
 export interface SpawnReq {
@@ -149,8 +150,8 @@ export class Sim {
   /** Arena systems: statuses, pickups, weapons, flames. */
   readonly arena: Arena;
   readonly sledges: Sledge[] = [];
-  /** Groups whose innermost ring closes in on the ball. */
-  closeIn: { group: number; delay: number; rate: number; cur: number; since: number; px: number; py: number; order: number[]; ptr: number }[] = [];
+  /** Ring stacks that close the hole after a breakout. */
+  snapBack: { group: number; order: number[]; ptr: number; R0: number; spacing: number; anim: { t0: number; dur: number; cols: number[]; from: number[]; to: number[] } | null }[] = [];
 
   readonly hooks = {
     step: [] as (() => void)[],
@@ -227,7 +228,7 @@ export class Sim {
       if (spec?.category !== 'object') continue;
       const params = withDefaults(spec, n.params);
       if (spec.kind === 'counter') {
-        this.counters.set(n.id, { nodeId: n.id, name: params.name, value: Number(params.initial) || 0, show: !!params.show, countGroup: -1 });
+        this.counters.set(n.id, { nodeId: n.id, name: params.name, value: Number(params.initial) || 0, show: !!params.show, countGroup: -1, place: params.place === 'center' ? 'center' : 'corner' });
         continue;
       }
       const index = this.groups.length;
@@ -853,55 +854,61 @@ export class Sim {
         w.setColliderVelocity(c, (tx - w.colX[c]) / this.dt, (ty - w.colY[c]) / this.dt, 0);
       }
     }
-    for (const ci of this.closeIn) this.stepCloseIn(ci);
+    for (const sb of this.snapBack) this.stepSnapBack(sb);
   }
 
-  /** The innermost ring of a group closes in around the ball after a delay, keeping its gaps a fixed width. */
-  private stepCloseIn(ci: Sim['closeIn'][number]): void {
+  /**
+   * After the ball breaks out and turns back toward the center, every ring left
+   * shrinks quickly so the innermost one is back at the starting radius, then stops.
+   */
+  private stepSnapBack(sb: Sim['snapBack'][number]): void {
     const w = this.world;
-    while (ci.ptr < ci.order.length && !w.colAlive[ci.order[ci.ptr]]) ci.ptr++;
-    if (ci.ptr >= ci.order.length) return;
-    const c = ci.order[ci.ptr];
-    if (ci.cur !== c) {
-      if (ci.cur >= 0 && w.colAlive[ci.cur]) w.setColliderVelocity(ci.cur, 0, 0, w.colW[ci.cur]);
-      ci.cur = c;
-      ci.since = this.time;
-      ci.px = NaN;
-    }
-    if (this.time - ci.since < ci.delay) return;
-    const meta = this.ringMeta[c];
-    if (!meta) return;
-    // Pivot: where the ball is when closing starts.
-    if (Number.isNaN(ci.px)) {
-      let found = false;
-      for (let i = 0; i < w.highWater; i++) {
-        if (!this.inPlay(i)) continue;
-        ci.px = w.x[i]; ci.py = w.y[i]; found = true;
-        break;
+    while (sb.ptr < sb.order.length && !w.colAlive[sb.order[sb.ptr]]) sb.ptr++;
+    if (sb.ptr >= sb.order.length) return;
+    if (sb.anim) {
+      const a = sb.anim;
+      const u = Math.min(1, (this.time + this.dt - a.t0) / a.dur);
+      const e = 1 - (1 - u) * (1 - u);
+      const de = (2 * (1 - u)) / a.dur;
+      for (let k = 0; k < a.cols.length; k++) {
+        const c = a.cols[k];
+        if (!w.colAlive[c]) continue;
+        const meta = this.ringMeta[c];
+        if (!meta) continue;
+        const R = a.from[k] + (a.to[k] - a.from[k]) * e;
+        const growth = u >= 1 ? 0 : ((a.to[k] - a.from[k]) * de) / Math.max(1, R);
+        this.reshapeRing(c, meta, R, growth);
       }
-      if (!found) return;
-    }
-    const R = w.colRingR[c];
-    const maxGap = Math.max(...meta.gaps.map((g) => g.len), 1);
-    let ballR = 10;
-    for (let i = 0; i < w.highWater; i++) if (this.inPlay(i)) { ballR = w.r[i]; break; }
-    const minR = Math.max(maxGap * 0.75, ballR * 2.6);
-    if (R <= minR * 1.001) {
-      // Clamped tight around the ball: twist the opening down so it drops out.
-      if (w.colGrowth[c] !== 0) this.reshapeRing(c, meta, R, 0);
-      const gapAbs = meta.gaps[0].at + w.colAngle[c];
-      let diff = (dmath.HALF_PI - gapAbs) % dmath.TAU;
-      if (diff > dmath.PI) diff -= dmath.TAU;
-      if (diff < -dmath.PI) diff += dmath.TAU;
-      const spin = Math.abs(diff) < 0.02 ? 0 : Math.sign(diff) * Math.min(3, Math.abs(diff) * 4 + 0.5);
-      w.setColliderVelocity(c, 0, 0, spin);
+      if (u >= 1) sb.anim = null;
       return;
     }
-    const Rn = Math.max(minR, R * (1 - ci.rate * this.dt));
-    const k = Rn / R;
-    const nx = ci.px + (w.colX[c] - ci.px) * k, ny = ci.py + (w.colY[c] - ci.py) * k;
-    w.setColliderVelocity(c, (nx - w.colX[c]) / this.dt, (ny - w.colY[c]) / this.dt, 0);
-    this.reshapeRing(c, meta, Rn, (Rn - R) / R / this.dt);
+    const inner = sb.order[sb.ptr];
+    if (w.colRingR[inner] - sb.R0 < sb.spacing * 0.5) return;
+    // Is the ball heading back toward the center?
+    const cx = w.colX[inner], cy = w.colY[inner];
+    let vr = 0, found = false;
+    for (let i = 0; i < w.highWater; i++) {
+      if (!this.inPlay(i)) continue;
+      const dx = w.x[i] - cx, dy = w.y[i] - cy;
+      const d = dmath.sqrt(dx * dx + dy * dy) || 1;
+      vr = (dx * w.vx[i] + dy * w.vy[i]) / d;
+      found = true;
+      break;
+    }
+    if (!found || vr >= 0) return;
+    const cols: number[] = [], from: number[] = [], to: number[] = [];
+    let j = 0;
+    for (let k = sb.ptr; k < sb.order.length; k++) {
+      const c = sb.order[k];
+      if (!w.colAlive[c]) continue;
+      cols.push(c);
+      from.push(w.colRingR[c]);
+      to.push(sb.R0 + j * sb.spacing);
+      j++;
+    }
+    // Fast, but never so fast that a ring could jump past the ball in one step.
+    const hole = from[0] - to[0];
+    sb.anim = { t0: this.time, dur: Math.max(0.28, hole / 520), cols, from, to };
   }
 
   /** Recompute a ring's arc pieces for radius R with fixed-length gaps. */

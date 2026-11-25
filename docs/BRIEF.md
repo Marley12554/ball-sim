@@ -66,6 +66,8 @@ Dark, clean, modern, refined. Techno, but not neon or noisy. Shares a general th
 - Modes: Ring Escape (Classic, Gauntlet 1,000 rings, Gauntlet 10K), Leak, Doubling Sledge, Spiral Drop, Mitosis, Arena (Duel, Free-for-all, Teams, Boss, Weapons Duel, Weapons Brawl), Tether Battle, Growth.
 - Arena: squares, HP 10, both take 1 on contact, powerups (red +1 damage 2 s, green heal 1, cyan shield 1, magenta teleport), stackable, spawning every 5 to 10 s. Health cards on the sides. Sudden death after a minute (fighters grow and speed up).
 - Weapons: sword, spear, sledgehammer, match (burn + ground flames), lightning rod, shield. Each grows stronger with hits.
+- Ring Gauntlet: hundreds of thin rings spinning together, gaps aligned into one rotating tunnel, no gravity, fixed camera, rings-left score in the center. The ball breaks out through the tunnel (passed rings turn to powder), the tunnel wall knocks it back, and the remaining rings snap back so the innermost is at the starting radius, then stop.
+- The sim view keeps the action clear of the top bar and the control bar.
 - No music yet.
 
 ## Build order

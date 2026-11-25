@@ -514,7 +514,7 @@ export class World {
     D[b + 8] = cx + u0x * radius; D[b + 9] = cy + u0y * radius;
     D[b + 10] = cx + u1x * radius; D[b + 11] = cy + u1y * radius;
     const col = this.pCol[p];
-    if (this.colRadial[col]) this.colRingR[col] = radius;
+    if (this.colRadial[col]) { if (this.colRingR[col] !== radius) this.radialDirty = true; this.colRingR[col] = radius; }
     this.colGrowth[col] = growth;
     if (!this.colRadial[col]) this.staticDirty = true;
   }

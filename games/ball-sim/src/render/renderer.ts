@@ -437,6 +437,10 @@ export class Renderer {
     const diag = Math.hypot(vx1 - vx0, vy1 - vy0) / 2;
     g.lineCap = 'round';
     g.lineJoin = 'round';
+    // Glow would wash densely packed ring stacks into one solid color.
+    let rings = 0;
+    for (let c = 0; c < w.colAlive.length && rings <= 60; c++) if (w.colAlive[c] && w.colRadial[c]) rings++;
+    const dense = rings > 60;
     for (let pass = 0; pass < (lite ? 1 : 2); pass++) {
       const glow = !lite && pass === 0;
       if (glow) g.globalCompositeOperation = 'lighter';
@@ -454,6 +458,7 @@ export class Renderer {
         if (kind === 'hammer' || kind === 'stop') continue;
         const titanium = sim.colMaterial[col] === 'titanium';
         if (titanium && glow) continue;
+        if (glow && dense && w.colRadial[col]) continue;
         const b = p * 12, D = w.pData, sc = w.colScale[col];
         const c = w.colCos[col], s = w.colSin[col], ox = w.colX[col], oy = w.colY[col];
         const ht = w.pHt[p];
@@ -469,13 +474,20 @@ export class Renderer {
           g.beginPath();
           if (R > diag * 1.5 && span > (diag * 3) / R) {
             // Only the visible stretch of big rings.
+            // The window around the camera can wrap past 0, so test it in three shifted copies.
             const toCam = Math.atan2(cy - acy, cx - acx);
-            const vis = (diag * 2.2) / R;
-            let rel = (((toCam - a0) % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
-            if (rel > span + vis && rel - Math.PI * 2 > -vis) rel -= Math.PI * 2;
-            const s0 = Math.max(0, rel - vis), s1 = Math.min(span, rel + vis);
-            if (s1 <= s0) continue;
-            g.arc(acx, acy, R, a0 + s0, a0 + s1);
+            const vis = Math.min(Math.PI, (diag * 2.2) / R);
+            const TAU = Math.PI * 2;
+            const rel = (((toCam - a0) % TAU) + TAU) % TAU;
+            let drew = false;
+            for (const shift of [-TAU, 0, TAU]) {
+              const s0 = Math.max(0, rel + shift - vis), s1 = Math.min(span, rel + shift + vis);
+              if (s1 <= s0) continue;
+              g.moveTo(acx + Math.cos(a0 + s0) * R, acy + Math.sin(a0 + s0) * R);
+              g.arc(acx, acy, R, a0 + s0, a0 + s1);
+              drew = true;
+            }
+            if (!drew) continue;
           } else g.arc(acx, acy, R, a0, a0 + span);
           open = true; openCol = col; openHt = ht;
           flush();
@@ -695,6 +707,25 @@ export class Renderer {
     g.font = `500 ${fs}px ${MONO}`;
     for (const c of sim.counters.values()) {
       if (!c.show) continue;
+      if (c.place === 'center') {
+        // Big score in the middle of the sim.
+        const L = this.layout;
+        const cy = L.top + (H - L.top - L.bottom) / 2;
+        const big = Math.max(28, u * 7);
+        g.save();
+        g.textAlign = 'center';
+        g.textBaseline = 'middle';
+        g.font = `600 ${big}px ${MONO}`;
+        g.shadowColor = 'rgba(0,0,0,0.6)';
+        g.shadowBlur = big * 0.4;
+        g.fillStyle = '#FFFFFF';
+        g.fillText(formatNum(sim.counterValue(c)), W / 2, cy);
+        g.restore();
+        g.textAlign = 'left';
+        g.textBaseline = 'top';
+        g.font = `500 ${fs}px ${MONO}`;
+        continue;
+      }
       const label = c.name.toUpperCase();
       g.fillStyle = '#8A919C';
       g.fillText(label, pad, y);
@@ -742,9 +773,15 @@ export class Renderer {
   /** Where health cards go and how much room they take. */
   private hudLayout(sim: Sim, W: number, H: number, opts: DrawOptions) {
     const out = { rx: 0, top: 0, bottom: 0, wide: true, cardH: 44, step: 50, cols: 2, topRows: 0, botRows: 0, topStart: 0, botStart: 0 };
-    if (!opts.hud || !this.roster.length) return out;
+    if (!opts.hud) return out;
+    const k = W / Math.max(1, this.canvas.clientWidth);
+    const hudTop = (opts.hudTop ?? 0) * k;
+    // In the full sim view, keep the action clear of the top bar and the control bar.
+    const barRoom = (opts.hudTop ? 84 : 0) * k;
+    out.top = hudTop;
+    out.bottom = barRoom;
+    if (!this.roster.length) return out;
     const u = Math.min(W, H) / 100;
-    const hudTop = (opts.hudTop ?? 0) * (W / Math.max(1, this.canvas.clientWidth));
     out.cardH = Math.max(44, u * 7.5);
     out.step = out.cardH + u * 1.5;
     out.wide = W / H > 1.15;
@@ -760,7 +797,6 @@ export class Renderer {
     const clockH = sim.settings.clock !== 'none' ? Math.max(20, u * 4.4) * 1.35 : 0;
     out.topStart = hudTop + pad + clockH;
     out.top = out.topStart + out.topRows * out.step + u;
-    const barRoom = (opts.hudTop ? 76 : 0) * (W / Math.max(1, this.canvas.clientWidth));
     out.bottom = out.botRows * out.step + pad + barRoom;
     out.botStart = H - out.bottom + u;
     return out;

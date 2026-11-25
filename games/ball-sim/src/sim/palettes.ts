@@ -11,6 +11,11 @@ export const PALETTES: Record<string, string[]> = {
   candy: ['#F9A8D4', '#C4B5FD', '#93C5FD', '#99F6E4'],
   prism: ['#F87171', '#FBBF24', '#34D399', '#60A5FA', '#C084FC', '#F87171'],
   titanium: ['#E5E9EE', '#9AA4B1', '#C9D0D8', '#7D8794'],
+  // Two-tone pairs for densely striped ring stacks.
+  'duo-dusk': ['#4F7CFF', '#FF8A3D'],
+  'duo-mint': ['#2DD4BF', '#F472B6'],
+  'duo-sun': ['#A78BFA', '#FCD34D'],
+  'duo-ice': ['#38BDF8', '#F43F5E'],
 };
 
 export const PALETTE_NAMES = Object.keys(PALETTES);
